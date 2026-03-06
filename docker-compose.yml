@@ -26,6 +26,7 @@ services:
       - "8000:8000"
     volumes:
       - ./backend/app:/app/app:z
+      - ./backend/alembic:/app/alembic:z
       - uploads:/app/uploads
     env_file:
       - .env
