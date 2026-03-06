@@ -35,6 +35,9 @@ class Frame(Base):
     performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id"))
     timestamp_ms: Mapped[int] = mapped_column(Integer)
     dancer_pose: Mapped[dict] = mapped_column(JSON)
+    left_hand: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    right_hand: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    face: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class Analysis(Base):

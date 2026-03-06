@@ -69,6 +69,9 @@ def run_pipeline(self, performance_id: int, video_path: str):
                     performance_id=performance_id,
                     timestamp_ms=fd["timestamp_ms"],
                     dancer_pose=fd["dancer_pose"],
+                    left_hand=fd.get("left_hand"),
+                    right_hand=fd.get("right_hand"),
+                    face=fd.get("face"),
                 ))
                 if len(batch) >= BATCH_SIZE:
                     session.add_all(batch)

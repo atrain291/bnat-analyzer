@@ -143,5 +143,13 @@ def _format_pose_summary(pose_summary: dict) -> str:
         lines.append(f"Average hip symmetry deviation: {pose_summary['hip_symmetry_avg']:.1f} degrees (0 = perfect symmetry)")
     if "balance_score" in pose_summary:
         lines.append(f"Overall balance score: {pose_summary['balance_score']:.2f} (0-1, higher is better)")
+    if "avg_foot_turnout" in pose_summary:
+        lines.append(f"Average foot turnout: {pose_summary['avg_foot_turnout']:.1f} degrees from vertical (ideal for aramandi: 45-60)")
+    if "avg_foot_turnout_left" in pose_summary:
+        lines.append(f"  Left foot turnout: {pose_summary['avg_foot_turnout_left']:.1f} degrees")
+    if "avg_foot_turnout_right" in pose_summary:
+        lines.append(f"  Right foot turnout: {pose_summary['avg_foot_turnout_right']:.1f} degrees")
+    if "avg_foot_flatness" in pose_summary:
+        lines.append(f"Average foot flatness: {pose_summary['avg_foot_flatness']:.4f} (lower = flatter strike, important for tattadavu)")
 
     return "\n".join(lines) if lines else "No aggregated pose statistics available yet."

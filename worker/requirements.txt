@@ -2,7 +2,8 @@ celery[redis]==5.4.0
 redis==5.2.1
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
-ultralytics==8.3.50
+rtmlib>=0.1.0
+onnxruntime-gpu>=1.17.0
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
 anthropic==0.40.0

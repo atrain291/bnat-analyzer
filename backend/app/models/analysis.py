@@ -14,8 +14,15 @@ class Frame(Base):
     performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id"))
     timestamp_ms: Mapped[int] = mapped_column(Integer)
 
-    # 17-point COCO keypoints: {keypoint_name: {x, y, z, confidence}}
+    # 23-point body+feet keypoints: {keypoint_name: {x, y, z, confidence}}
     dancer_pose: Mapped[dict] = mapped_column(JSON)
+
+    # 21-point hand keypoints per hand: {joint_name: {x, y, confidence}}
+    left_hand: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    right_hand: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # 68-point face landmarks: [{x, y, confidence}, ...]
+    face: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     performance: Mapped["Performance"] = relationship(back_populates="frames")  # noqa: F821
     joint_angle_state: Mapped["JointAngleState | None"] = relationship(back_populates="frame", uselist=False)

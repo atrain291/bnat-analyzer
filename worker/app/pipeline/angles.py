@@ -1,7 +1,8 @@
-"""Compute joint angles and pose statistics from COCO keypoints.
+"""Compute joint angles and pose statistics from COCO-WholeBody keypoints.
 
 Provides per-frame angle computation and aggregate statistics
-for feeding into the LLM coaching prompt.
+for feeding into the LLM coaching prompt. Supports 23 body+feet keypoints
+from RTMPose WholeBody (133-point model).
 """
 
 import math
@@ -13,7 +14,7 @@ def _angle_between(p1: dict, p2: dict, p3: dict) -> float | None:
     Returns None if any point has low confidence.
     """
     min_conf = 0.3
-    if p1["confidence"] < min_conf or p2["confidence"] < min_conf or p3["confidence"] < min_conf:
+    if p1.get("confidence", 0) < min_conf or p2.get("confidence", 0) < min_conf or p3.get("confidence", 0) < min_conf:
         return None
 
     v1 = (p1["x"] - p2["x"], p1["y"] - p2["y"])
@@ -108,6 +109,38 @@ def compute_frame_angles(pose: dict) -> dict:
         else:
             angles["hip_symmetry"] = hip_diff
 
+    # --- Foot angles (require WholeBody 133-point keypoints) ---
+
+    # Foot turnout: angle formed by heel-big_toe line relative to forward axis
+    # Important for aramandi — feet should turn outward ~45-60 degrees
+    for side in ("left", "right"):
+        heel = pose.get(f"{side}_heel", {})
+        big_toe = pose.get(f"{side}_big_toe", {})
+        ankle = pose.get(f"{side}_ankle", {})
+
+        if (heel.get("confidence", 0) > 0.3
+                and big_toe.get("confidence", 0) > 0.3):
+            # Foot direction vector (heel -> big toe)
+            foot_dx = big_toe["x"] - heel["x"]
+            foot_dy = big_toe["y"] - heel["y"]
+            # Angle from vertical (0 = pointing up, 90 = pointing sideways)
+            if abs(foot_dx) > 1e-6 or abs(foot_dy) > 1e-6:
+                foot_angle = math.degrees(math.atan2(abs(foot_dx), -foot_dy))
+                angles[f"{side}_foot_turnout"] = foot_angle
+
+        # Foot flatness: vertical distance between heel and big_toe
+        # Small difference = flat foot, large difference = on toes or heels
+        if (heel.get("confidence", 0) > 0.3
+                and big_toe.get("confidence", 0) > 0.3):
+            angles[f"{side}_foot_flatness"] = abs(heel["y"] - big_toe["y"])
+
+        # Ankle-heel-toe angle: measures foot flexion
+        # ~180 = flat foot, <180 = foot pointed, >180 = foot flexed
+        if ankle.get("confidence", 0) > 0.3:
+            foot_angle = _angle_between(ankle, heel, big_toe)
+            if foot_angle is not None:
+                angles[f"{side}_foot_angle"] = foot_angle
+
     return angles
 
 
@@ -125,6 +158,10 @@ def summarize_pose_statistics(frames_data: list[dict]) -> dict:
     arm_left = []
     arm_right = []
     hip_sym = []
+    foot_turnout_left = []
+    foot_turnout_right = []
+    foot_flatness_left = []
+    foot_flatness_right = []
 
     for frame in frames_data:
         pose = frame.get("dancer_pose", {})
@@ -143,6 +180,14 @@ def summarize_pose_statistics(frames_data: list[dict]) -> dict:
             arm_right.append(angles["arm_extension_right"])
         if "hip_symmetry" in angles:
             hip_sym.append(angles["hip_symmetry"])
+        if "left_foot_turnout" in angles:
+            foot_turnout_left.append(angles["left_foot_turnout"])
+        if "right_foot_turnout" in angles:
+            foot_turnout_right.append(angles["right_foot_turnout"])
+        if "left_foot_flatness" in angles:
+            foot_flatness_left.append(angles["left_foot_flatness"])
+        if "right_foot_flatness" in angles:
+            foot_flatness_right.append(angles["right_foot_flatness"])
 
     summary = {}
 
@@ -166,6 +211,20 @@ def summarize_pose_statistics(frames_data: list[dict]) -> dict:
 
     if hip_sym:
         summary["hip_symmetry_avg"] = sum(hip_sym) / len(hip_sym)
+
+    # Foot turnout (degrees from vertical, higher = more turned out)
+    if foot_turnout_left:
+        summary["avg_foot_turnout_left"] = sum(foot_turnout_left) / len(foot_turnout_left)
+    if foot_turnout_right:
+        summary["avg_foot_turnout_right"] = sum(foot_turnout_right) / len(foot_turnout_right)
+    if foot_turnout_left and foot_turnout_right:
+        all_turnout = foot_turnout_left + foot_turnout_right
+        summary["avg_foot_turnout"] = sum(all_turnout) / len(all_turnout)
+
+    # Foot flatness (lower = flatter, which is better for flat strikes)
+    if foot_flatness_left and foot_flatness_right:
+        all_flatness = foot_flatness_left + foot_flatness_right
+        summary["avg_foot_flatness"] = sum(all_flatness) / len(all_flatness)
 
     # Composite balance score (0-1)
     balance_components = []
