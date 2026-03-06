@@ -60,11 +60,13 @@ export default function ProcessingStatus() {
     navigate("/");
   };
 
+  const [stopping, setStopping] = useState(false);
+
   const handleStop = async () => {
     if (!performanceId) return;
+    setStopping(true);
     await stopPerformance(Number(performanceId));
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    navigate(`/review/${performanceId}`);
+    // Pipeline will finish analysis on collected frames, then polling will redirect
   };
 
   const currentStageIdx = STAGES.findIndex((s) => s.key === progress?.stage);
@@ -82,6 +84,8 @@ export default function ProcessingStatus() {
             ? "Processing failed"
             : status === "detecting"
             ? "Scanning video for dancers..."
+            : stopping
+            ? "Wrapping up with collected frames..."
             : "Analyzing your Bharatanatyam performance..."}
         </p>
       </div>
@@ -163,10 +167,11 @@ export default function ProcessingStatus() {
         )}
         {status === "processing" && (
           <button
-            className="rounded-lg bg-brand-600 px-6 py-2 text-white hover:bg-brand-700"
+            className="rounded-lg bg-brand-600 px-6 py-2 text-white hover:bg-brand-700 disabled:opacity-50"
             onClick={handleStop}
+            disabled={stopping}
           >
-            Stop &amp; Review
+            {stopping ? "Finishing analysis..." : "Stop & Analyze"}
           </button>
         )}
         {(status === "queued" || status === "processing" || status === "detecting") && (

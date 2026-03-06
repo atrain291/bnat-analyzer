@@ -208,8 +208,6 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                 is_cancelled=is_cancelled,
             )
 
-            cancelled = is_cancelled()
-
             # Store frames per dancer
             _update_progress(performance_id, "pose_analysis", 80.0)
             total_stored = 0
@@ -219,20 +217,17 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                 with get_session() as session:
                     total_stored += _store_frames_and_metrics(session, performance_id, pd_id, frames_data)
 
-            if not cancelled:
-                # Analyze each dancer
-                num_dancers = len(selected_tracks)
-                for i, (track_id, frames_data) in enumerate(per_dancer_frames.items()):
-                    info = track_id_to_info[track_id]
-                    pct = 83.0 + (i / max(num_dancers, 1)) * 12.0
-                    _update_progress(performance_id, "llm_synthesis", pct)
-                    if frames_data:
-                        _analyze_dancer(
-                            performance_id, info["performance_dancer_id"],
-                            info.get("label"), frames_data, metadata,
-                        )
-            else:
-                logger.info(f"Pipeline cancelled for performance {performance_id}, skipping analysis. Stored {total_stored} frames.")
+            # Analyze each dancer (runs on whatever frames were collected)
+            num_dancers = len(selected_tracks)
+            for i, (track_id, frames_data) in enumerate(per_dancer_frames.items()):
+                info = track_id_to_info[track_id]
+                pct = 83.0 + (i / max(num_dancers, 1)) * 12.0
+                _update_progress(performance_id, "llm_synthesis", pct)
+                if frames_data:
+                    _analyze_dancer(
+                        performance_id, info["performance_dancer_id"],
+                        info.get("label"), frames_data, metadata,
+                    )
 
         else:
             # Single-dancer mode (backward compatible)
@@ -243,17 +238,12 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
             _update_progress(performance_id, "pose_estimation", 20.0, frame=0, total_frames=total_frames)
             frames_data = run_pose_estimation(video_path, metadata, progress_callback=pose_progress, is_cancelled=is_cancelled)
 
-            cancelled = is_cancelled()
-
             with get_session() as session:
                 _store_frames_and_metrics(session, performance_id, None, frames_data)
 
-            if not cancelled:
-                _update_progress(performance_id, "pose_analysis", 83.0)
-                _update_progress(performance_id, "llm_synthesis", 85.0)
-                _analyze_dancer(performance_id, None, None, frames_data, metadata)
-            else:
-                logger.info(f"Pipeline cancelled for performance {performance_id}, skipping analysis. Stored {len(frames_data)} frames.")
+            _update_progress(performance_id, "pose_analysis", 83.0)
+            _update_progress(performance_id, "llm_synthesis", 85.0)
+            _analyze_dancer(performance_id, None, None, frames_data, metadata)
 
         # Complete
         _update_progress(performance_id, "scoring", 95.0)

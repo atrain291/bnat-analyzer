@@ -84,30 +84,23 @@ def select_dancers(performance_id: int, body: DancerSelectionRequest, db: Sessio
 
 @router.post("/{performance_id}/stop")
 def stop_performance(performance_id: int, db: Session = Depends(get_db)):
-    """Stop processing and keep whatever frames have been stored so far."""
+    """Signal the worker to stop pose estimation early and proceed to analysis."""
     performance = db.query(Performance).filter(Performance.id == performance_id).first()
     if not performance:
         raise HTTPException(status_code=404, detail="Performance not found")
     if performance.status not in ("queued", "processing", "detecting"):
         raise HTTPException(status_code=400, detail=f"Performance is not processing (status: {performance.status})")
 
-    # Set cancellation flag in Redis so the worker stops gracefully
+    # Set cancellation flag in Redis so the worker stops pose estimation early
+    # The pipeline will still run analysis/scoring on collected frames
     import redis
     from app.config import settings
     r = redis.from_url(settings.redis_url)
     r.set(f"cancel:{performance_id}", "1", ex=300)
 
-    # Revoke the Celery task
-    if performance.task_id:
-        from app.tasks import celery_app
-        celery_app.control.revoke(performance.task_id, terminate=False)
-
-    performance.status = "complete"
-    performance.error = None
-    performance.pipeline_progress = {"stage": "complete", "pct": 100.0}
     db.commit()
 
-    return {"status": "complete", "message": "Processing stopped, partial results saved"}
+    return {"status": "stopping", "message": "Stopping pose estimation, analysis will run on collected frames"}
 
 
 @router.delete("/{performance_id}")
