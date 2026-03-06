@@ -46,6 +46,7 @@ class Performance(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships
+    dancer: Mapped["Dancer"] = relationship(back_populates="performances")  # noqa: F821
     session: Mapped["Session | None"] = relationship(back_populates="performances")
-    frames: Mapped[list["Frame"]] = relationship(back_populates="performance")  # noqa: F821
-    analysis: Mapped[list["Analysis"]] = relationship(back_populates="performance")  # noqa: F821
+    frames: Mapped[list["Frame"]] = relationship(back_populates="performance", cascade="all, delete-orphan")  # noqa: F821
+    analysis: Mapped[list["Analysis"]] = relationship(back_populates="performance", cascade="all, delete-orphan")  # noqa: F821

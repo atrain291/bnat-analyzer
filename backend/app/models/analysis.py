@@ -25,9 +25,9 @@ class Frame(Base):
     face: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     performance: Mapped["Performance"] = relationship(back_populates="frames")  # noqa: F821
-    joint_angle_state: Mapped["JointAngleState | None"] = relationship(back_populates="frame", uselist=False)
-    balance_metrics: Mapped["BalanceMetrics | None"] = relationship(back_populates="frame", uselist=False)
-    mudra_state: Mapped["MudraState | None"] = relationship(back_populates="frame", uselist=False)
+    joint_angle_state: Mapped["JointAngleState | None"] = relationship(back_populates="frame", uselist=False, cascade="all, delete-orphan")
+    balance_metrics: Mapped["BalanceMetrics | None"] = relationship(back_populates="frame", uselist=False, cascade="all, delete-orphan")
+    mudra_state: Mapped["MudraState | None"] = relationship(back_populates="frame", uselist=False, cascade="all, delete-orphan")
 
 
 class JointAngleState(Base):
