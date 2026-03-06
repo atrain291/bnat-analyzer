@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { Play, Pause, SkipBack, Trash2, ArrowLeft } from "lucide-react";
-import { getPerformance, deletePerformance, Performance, FrameData, PerformanceDancer } from "../api/performances";
+import { getPerformance, deletePerformance, Performance, FrameData, AnalysisData } from "../api/performances";
 
 // COCO skeleton connections for Bharatanatyam visualization
 const SKELETON_CONNECTIONS: [string, string][] = [
@@ -44,6 +44,41 @@ const DANCER_COLORS = [
 
 const SAFFRON = "#F9A825";
 const SAFFRON_DIM = "rgba(249, 168, 37, 0.4)";
+
+function ScoreCards({ analysis }: { analysis: AnalysisData }) {
+  const scores = [
+    { label: "Overall", value: analysis.overall_score },
+    { label: "Aramandi", value: analysis.aramandi_score },
+    { label: "Upper Body", value: analysis.upper_body_score },
+    { label: "Symmetry", value: analysis.symmetry_score },
+    { label: "Foot Technique", value: analysis.technique_scores?.foot_technique_score ?? null },
+  ];
+
+  const hasScores = scores.some((s) => s.value !== null);
+  if (!hasScores) return null;
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      {scores.map(
+        (s) =>
+          s.value !== null && (
+            <div
+              key={s.label}
+              className={`rounded-lg p-3 text-center ${
+                s.label === "Overall" ? "bg-brand-600/20 border border-brand-500/30" : "bg-gray-700"
+              }`}
+            >
+              <div className="text-2xl font-bold text-brand-400">
+                {s.value}
+                <span className="text-sm font-normal text-gray-500"> / 100</span>
+              </div>
+              <div className="text-xs text-gray-400">{s.label}</div>
+            </div>
+          )
+      )}
+    </div>
+  );
+}
 
 export default function VideoReview() {
   const { performanceId } = useParams<{ performanceId: string }>();
@@ -387,24 +422,7 @@ export default function VideoReview() {
             if (!analysis) return <p className="text-gray-500">No analysis available for this dancer.</p>;
             return (
               <>
-                {(analysis.aramandi_score !== null || analysis.upper_body_score !== null || analysis.symmetry_score !== null) && (
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    {[
-                      { label: "Aramandi", value: analysis.aramandi_score },
-                      { label: "Upper Body", value: analysis.upper_body_score },
-                      { label: "Symmetry", value: analysis.symmetry_score },
-                      { label: "Rhythm", value: analysis.rhythm_consistency_score },
-                    ].map(
-                      (s) =>
-                        s.value !== null && (
-                          <div key={s.label} className="rounded-lg bg-gray-700 p-3 text-center">
-                            <div className="text-2xl font-bold text-brand-400">{s.value}</div>
-                            <div className="text-xs text-gray-400">{s.label}</div>
-                          </div>
-                        )
-                    )}
-                  </div>
-                )}
+                <ScoreCards analysis={analysis} />
                 {analysis.llm_summary && (
                   <div className="prose prose-invert max-w-none text-sm text-gray-300 whitespace-pre-wrap leading-relaxed">
                     {analysis.llm_summary}
@@ -420,24 +438,7 @@ export default function VideoReview() {
           return analysis ? (
             <section className="rounded-lg bg-gray-800 p-6 space-y-4">
               <h2 className="text-lg font-semibold text-brand-400">Coaching Feedback</h2>
-              {(analysis.aramandi_score !== null || analysis.upper_body_score !== null || analysis.symmetry_score !== null) && (
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  {[
-                    { label: "Aramandi", value: analysis.aramandi_score },
-                    { label: "Upper Body", value: analysis.upper_body_score },
-                    { label: "Symmetry", value: analysis.symmetry_score },
-                    { label: "Rhythm", value: analysis.rhythm_consistency_score },
-                  ].map(
-                    (s) =>
-                      s.value !== null && (
-                        <div key={s.label} className="rounded-lg bg-gray-700 p-3 text-center">
-                          <div className="text-2xl font-bold text-brand-400">{s.value}</div>
-                          <div className="text-xs text-gray-400">{s.label}</div>
-                        </div>
-                      )
-                  )}
-                </div>
-              )}
+              <ScoreCards analysis={analysis} />
               {analysis.llm_summary && (
                 <div className="prose prose-invert max-w-none text-sm text-gray-300 whitespace-pre-wrap leading-relaxed">
                   {analysis.llm_summary}
