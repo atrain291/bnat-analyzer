@@ -121,6 +121,11 @@ export async function getPerformance(id: number): Promise<Performance> {
   return data;
 }
 
+export async function stopPerformance(id: number): Promise<{ status: string; message: string }> {
+  const { data } = await api.post(`/performances/${id}/stop`);
+  return data;
+}
+
 export async function deletePerformance(id: number): Promise<void> {
   await api.delete(`/performances/${id}`);
 }

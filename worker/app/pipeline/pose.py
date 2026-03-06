@@ -2,7 +2,6 @@ import logging
 import subprocess
 from typing import Callable
 
-import cv2
 import numpy as np
 from rtmlib import Wholebody
 
@@ -255,6 +254,7 @@ def run_pose_estimation(
     video_path: str,
     metadata: dict,
     progress_callback: Callable[[int, int], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
     """Run RTMPose WholeBody on each frame and return normalized keypoints.
 
@@ -296,6 +296,9 @@ def run_pose_estimation(
             frame_idx += 1
             if progress_callback and frame_idx % 10 == 0:
                 progress_callback(frame_idx, total_frames)
+            if is_cancelled and frame_idx % 10 == 0 and is_cancelled():
+                logger.info(f"Pose estimation cancelled at frame {frame_idx}/{total_frames}")
+                break
 
     finally:
         process.stdout.close()
@@ -362,6 +365,7 @@ def run_pose_estimation_multi(
     selected_track_ids: set[int],
     tracker_class=None,
     progress_callback: Callable[[int, int], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> dict[int, list[dict]]:
     """Run pose estimation on all frames, tracking selected persons only.
 
@@ -412,6 +416,9 @@ def run_pose_estimation_multi(
             frame_idx += 1
             if progress_callback and frame_idx % 10 == 0:
                 progress_callback(frame_idx, total_frames)
+            if is_cancelled and frame_idx % 10 == 0 and is_cancelled():
+                logger.info(f"Multi-person pose estimation cancelled at frame {frame_idx}/{total_frames}")
+                break
 
     finally:
         process.stdout.close()

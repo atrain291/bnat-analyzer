@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Loader2, CheckCircle2, XCircle } from "lucide-react";
-import { getPerformanceStatus, deletePerformance, PipelineProgress } from "../api/performances";
+import { getPerformanceStatus, deletePerformance, stopPerformance, PipelineProgress } from "../api/performances";
 
 const STAGES = [
   { key: "ingest", label: "Ingest Video", weight: 3 },
@@ -58,6 +58,13 @@ export default function ProcessingStatus() {
     if (!performanceId) return;
     await deletePerformance(Number(performanceId));
     navigate("/");
+  };
+
+  const handleStop = async () => {
+    if (!performanceId) return;
+    await stopPerformance(Number(performanceId));
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    navigate(`/review/${performanceId}`);
   };
 
   const currentStageIdx = STAGES.findIndex((s) => s.key === progress?.stage);
@@ -154,7 +161,15 @@ export default function ProcessingStatus() {
             Back to Dashboard
           </button>
         )}
-        {(status === "queued" || status === "processing") && (
+        {status === "processing" && (
+          <button
+            className="rounded-lg bg-brand-600 px-6 py-2 text-white hover:bg-brand-700"
+            onClick={handleStop}
+          >
+            Stop &amp; Review
+          </button>
+        )}
+        {(status === "queued" || status === "processing" || status === "detecting") && (
           <button
             className="rounded-lg bg-red-800 px-6 py-2 text-white hover:bg-red-700"
             onClick={handleCancel}
