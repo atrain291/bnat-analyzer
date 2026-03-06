@@ -11,7 +11,8 @@ class Frame(Base):
     __tablename__ = "frames"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id"))
+    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"))
+    performance_dancer_id: Mapped[int | None] = mapped_column(ForeignKey("performance_dancers.id", ondelete="CASCADE"), nullable=True)
     timestamp_ms: Mapped[int] = mapped_column(Integer)
 
     # 23-point body+feet keypoints: {keypoint_name: {x, y, z, confidence}}
@@ -25,6 +26,7 @@ class Frame(Base):
     face: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     performance: Mapped["Performance"] = relationship(back_populates="frames")  # noqa: F821
+    performance_dancer: Mapped["PerformanceDancer | None"] = relationship(back_populates="frames")  # noqa: F821
     joint_angle_state: Mapped["JointAngleState | None"] = relationship(back_populates="frame", uselist=False, cascade="all, delete-orphan")
     balance_metrics: Mapped["BalanceMetrics | None"] = relationship(back_populates="frame", uselist=False, cascade="all, delete-orphan")
     mudra_state: Mapped["MudraState | None"] = relationship(back_populates="frame", uselist=False, cascade="all, delete-orphan")
@@ -85,7 +87,8 @@ class Analysis(Base):
     __tablename__ = "analyses"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id"), unique=True)
+    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"))
+    performance_dancer_id: Mapped[int | None] = mapped_column(ForeignKey("performance_dancers.id", ondelete="CASCADE"), nullable=True)
 
     # Scores (0-100)
     aramandi_score: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -103,3 +106,4 @@ class Analysis(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     performance: Mapped["Performance"] = relationship(back_populates="analysis")  # noqa: F821
+    performance_dancer: Mapped["PerformanceDancer | None"] = relationship(back_populates="analysis")  # noqa: F821

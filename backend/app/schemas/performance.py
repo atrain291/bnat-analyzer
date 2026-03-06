@@ -17,12 +17,14 @@ class FrameResponse(BaseModel):
     id: int
     timestamp_ms: int
     dancer_pose: dict
+    performance_dancer_id: int | None = None
 
 
 class AnalysisResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    performance_dancer_id: int | None = None
     aramandi_score: float | None
     upper_body_score: float | None
     symmetry_score: float | None
@@ -48,9 +50,40 @@ class PerformanceResponse(BaseModel):
     status: str
     pipeline_progress: dict | None
     error: str | None
+    detection_frame_url: str | None = None
     created_at: datetime
     frames: list[FrameResponse] = []
     analysis: list[AnalysisResponse] = []
+    detected_persons: list[DetectedPersonResponse] = []
+    performance_dancers: list[PerformanceDancerResponse] = []
+
+
+class DetectedPersonResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    track_id: int
+    bbox: dict
+    representative_pose: dict
+    frame_count: int
+    area: float
+
+
+class PerformanceDancerResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    track_id: int
+    label: str | None
+
+
+class DancerSelectionItem(BaseModel):
+    track_id: int
+    label: str | None = None
+
+
+class DancerSelectionRequest(BaseModel):
+    selections: list[DancerSelectionItem]
 
 
 class UploadResponse(BaseModel):

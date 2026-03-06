@@ -35,6 +35,7 @@ class Performance(Base):
     task_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     error: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     pipeline_progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    detection_frame_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -43,6 +44,7 @@ class Frame(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id"))
+    performance_dancer_id: Mapped[int | None] = mapped_column(ForeignKey("performance_dancers.id"), nullable=True)
     timestamp_ms: Mapped[int] = mapped_column(Integer)
     dancer_pose: Mapped[dict] = mapped_column(JSON)
     left_hand: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -77,11 +79,33 @@ class BalanceMetrics(Base):
     stability_score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class DetectedPerson(Base):
+    __tablename__ = "detected_persons"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id"))
+    track_id: Mapped[int] = mapped_column(Integer)
+    bbox: Mapped[dict] = mapped_column(JSON)
+    representative_pose: Mapped[dict] = mapped_column(JSON)
+    frame_count: Mapped[int] = mapped_column(Integer)
+    area: Mapped[float] = mapped_column(Float)
+
+
+class PerformanceDancer(Base):
+    __tablename__ = "performance_dancers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id"))
+    track_id: Mapped[int] = mapped_column(Integer)
+    label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
 class Analysis(Base):
     __tablename__ = "analyses"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id"), unique=True)
+    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id"))
+    performance_dancer_id: Mapped[int | None] = mapped_column(ForeignKey("performance_dancers.id"), nullable=True)
     aramandi_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     upper_body_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     symmetry_score: Mapped[float | None] = mapped_column(Float, nullable=True)

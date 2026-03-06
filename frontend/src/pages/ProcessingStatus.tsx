@@ -4,10 +4,13 @@ import { Loader2, CheckCircle2, XCircle } from "lucide-react";
 import { getPerformanceStatus, deletePerformance, PipelineProgress } from "../api/performances";
 
 const STAGES = [
-  { key: "ingest", label: "Ingest Video", weight: 5 },
-  { key: "pose_estimation", label: "Pose Estimation", weight: 65 },
+  { key: "ingest", label: "Ingest Video", weight: 3 },
+  { key: "detection", label: "Detecting Dancers", weight: 7 },
+  { key: "pose_estimation", label: "Pose Estimation", weight: 55 },
+  { key: "pose_analysis", label: "Pose Analysis", weight: 5 },
   { key: "llm_synthesis", label: "AI Coaching", weight: 15 },
-  { key: "complete", label: "Complete", weight: 15 },
+  { key: "scoring", label: "Scoring", weight: 5 },
+  { key: "complete", label: "Complete", weight: 10 },
 ];
 
 export default function ProcessingStatus() {
@@ -31,6 +34,10 @@ export default function ProcessingStatus() {
         if (data.status === "complete") {
           if (intervalRef.current) clearInterval(intervalRef.current);
           setTimeout(() => navigate(`/review/${performanceId}`), 1500);
+        }
+        if (data.status === "awaiting_selection") {
+          if (intervalRef.current) clearInterval(intervalRef.current);
+          setTimeout(() => navigate(`/select-dancers/${performanceId}`), 500);
         }
         if (data.status === "failed") {
           if (intervalRef.current) clearInterval(intervalRef.current);
@@ -62,8 +69,12 @@ export default function ProcessingStatus() {
         <p className="mt-1 text-gray-400">
           {status === "complete"
             ? "Analysis complete! Redirecting..."
+            : status === "awaiting_selection"
+            ? "Dancers detected! Redirecting to selection..."
             : status === "failed"
             ? "Processing failed"
+            : status === "detecting"
+            ? "Scanning video for dancers..."
             : "Analyzing your Bharatanatyam performance..."}
         </p>
       </div>

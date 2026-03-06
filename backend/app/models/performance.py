@@ -45,8 +45,42 @@ class Performance(Base):
     pipeline_progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # Detection
+    detection_frame_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     # Relationships
     dancer: Mapped["Dancer"] = relationship(back_populates="performances")  # noqa: F821
     session: Mapped["Session | None"] = relationship(back_populates="performances")
     frames: Mapped[list["Frame"]] = relationship(back_populates="performance", cascade="all, delete-orphan")  # noqa: F821
     analysis: Mapped[list["Analysis"]] = relationship(back_populates="performance", cascade="all, delete-orphan")  # noqa: F821
+    detected_persons: Mapped[list["DetectedPerson"]] = relationship(back_populates="performance", cascade="all, delete-orphan")
+    performance_dancers: Mapped[list["PerformanceDancer"]] = relationship(back_populates="performance", cascade="all, delete-orphan")
+
+
+class DetectedPerson(Base):
+    """A person detected during the detection pass."""
+    __tablename__ = "detected_persons"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"))
+    track_id: Mapped[int] = mapped_column(Integer)
+    bbox: Mapped[dict] = mapped_column(JSON)
+    representative_pose: Mapped[dict] = mapped_column(JSON)
+    frame_count: Mapped[int] = mapped_column(Integer)
+    area: Mapped[float] = mapped_column(Float)
+
+    performance: Mapped["Performance"] = relationship(back_populates="detected_persons")
+
+
+class PerformanceDancer(Base):
+    """A user-confirmed dancer selection for analysis."""
+    __tablename__ = "performance_dancers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"))
+    track_id: Mapped[int] = mapped_column(Integer)
+    label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    performance: Mapped["Performance"] = relationship(back_populates="performance_dancers")
+    frames: Mapped[list["Frame"]] = relationship(back_populates="performance_dancer", cascade="all, delete-orphan")  # noqa: F821
+    analysis: Mapped["Analysis | None"] = relationship(back_populates="performance_dancer", uselist=False, cascade="all, delete-orphan")  # noqa: F821

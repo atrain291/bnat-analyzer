@@ -15,6 +15,7 @@ def generate_coaching_feedback(
     item_type: str | None = None,
     talam: str | None = None,
     pose_summary: dict | None = None,
+    dancer_label: str | None = None,
 ) -> str:
     """Generate Bharatanatyam coaching feedback using Claude API.
 
@@ -46,6 +47,8 @@ def generate_coaching_feedback(
     if talam:
         context_parts.append(f"Talam: {talam}")
 
+    if dancer_label:
+        context_parts.append(f"Dancer: {dancer_label}")
     context_str = "\n".join(context_parts)
 
     # Build reference section from adavu catalog

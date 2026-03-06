@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { Play, Pause, SkipBack, Trash2, ArrowLeft } from "lucide-react";
-import { getPerformance, deletePerformance, Performance, FrameData } from "../api/performances";
+import { getPerformance, deletePerformance, Performance, FrameData, PerformanceDancer } from "../api/performances";
 
 // COCO skeleton connections for Bharatanatyam visualization
 const SKELETON_CONNECTIONS: [string, string][] = [
@@ -33,6 +33,15 @@ const SKELETON_CONNECTIONS: [string, string][] = [
 
 const PLAYBACK_SPEEDS = [0.25, 0.5, 1, 1.5, 2];
 
+const DANCER_COLORS = [
+  "#F9A825", // saffron
+  "#00BCD4", // teal
+  "#E91E63", // magenta
+  "#8BC34A", // lime
+  "#FF7043", // coral
+  "#7C4DFF", // violet
+];
+
 const SAFFRON = "#F9A825";
 const SAFFRON_DIM = "rgba(249, 168, 37, 0.4)";
 
@@ -44,6 +53,8 @@ export default function VideoReview() {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [showSkeleton, setShowSkeleton] = useState(true);
+  const [activeDancerTab, setActiveDancerTab] = useState<number | null>(null);
+  const [visibleDancers, setVisibleDancers] = useState<Set<number>>(new Set());
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -54,7 +65,14 @@ export default function VideoReview() {
     if (!performanceId) return;
     setLoading(true);
     getPerformance(Number(performanceId))
-      .then(setPerf)
+      .then((data) => {
+        setPerf(data);
+        if (data.performance_dancers.length > 0) {
+          const ids = new Set(data.performance_dancers.map((d) => d.id));
+          setVisibleDancers(ids);
+          setActiveDancerTab(data.performance_dancers[0].id);
+        }
+      })
       .catch(() => navigate("/"))
       .finally(() => setLoading(false));
   }, [performanceId, navigate]);
@@ -81,46 +99,61 @@ export default function VideoReview() {
     []
   );
 
-  const drawSkeleton = useCallback(
-    (frame: FrameData, canvas: HTMLCanvasElement) => {
+  const getDancerColor = useCallback(
+    (dancerId: number | null): string => {
+      if (!perf || !dancerId) return SAFFRON;
+      const idx = perf.performance_dancers.findIndex((d) => d.id === dancerId);
+      return idx >= 0 ? DANCER_COLORS[idx % DANCER_COLORS.length] : SAFFRON;
+    },
+    [perf]
+  );
+
+  const drawSkeletons = useCallback(
+    (frames: FrameData[], canvas: HTMLCanvasElement) => {
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       if (!showSkeleton) return;
 
-      const pose = frame.dancer_pose;
-      if (!pose || Object.keys(pose).length === 0) return;
-
       const w = canvas.width;
       const h = canvas.height;
 
-      // Draw connections
-      ctx.lineWidth = 3;
-      for (const [from, to] of SKELETON_CONNECTIONS) {
-        const a = pose[from];
-        const b = pose[to];
-        if (!a || !b || a.confidence < 0.3 || b.confidence < 0.3) continue;
+      for (const frame of frames) {
+        const pdId = frame.performance_dancer_id;
+        if (pdId && !visibleDancers.has(pdId)) continue;
 
-        const alpha = Math.min(a.confidence, b.confidence);
-        ctx.strokeStyle =
-          alpha > 0.5 ? SAFFRON : SAFFRON_DIM;
-        ctx.beginPath();
-        ctx.moveTo(a.x * w, a.y * h);
-        ctx.lineTo(b.x * w, b.y * h);
-        ctx.stroke();
-      }
+        const color = getDancerColor(pdId);
+        const pose = frame.dancer_pose;
+        if (!pose || Object.keys(pose).length === 0) continue;
 
-      // Draw keypoints
-      for (const [, kp] of Object.entries(pose)) {
-        if (kp.confidence < 0.3) continue;
-        ctx.fillStyle = kp.confidence > 0.5 ? SAFFRON : SAFFRON_DIM;
-        ctx.beginPath();
-        ctx.arc(kp.x * w, kp.y * h, 4, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.lineWidth = 3;
+        for (const [from, to] of SKELETON_CONNECTIONS) {
+          const a = pose[from];
+          const b = pose[to];
+          if (!a || !b || a.confidence < 0.3 || b.confidence < 0.3) continue;
+
+          const alpha = Math.min(a.confidence, b.confidence);
+          ctx.globalAlpha = alpha > 0.5 ? 1.0 : 0.4;
+          ctx.strokeStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(a.x * w, a.y * h);
+          ctx.lineTo(b.x * w, b.y * h);
+          ctx.stroke();
+        }
+
+        for (const [, kp] of Object.entries(pose)) {
+          if (kp.confidence < 0.3) continue;
+          ctx.globalAlpha = kp.confidence > 0.5 ? 1.0 : 0.4;
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(kp.x * w, kp.y * h, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
+      ctx.globalAlpha = 1.0;
     },
-    [showSkeleton]
+    [showSkeleton, visibleDancers, getDancerColor]
   );
 
   // Animation loop
@@ -131,16 +164,28 @@ export default function VideoReview() {
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
 
+    // Group frames by dancer for multi-dancer rendering
+    const framesByDancer = new Map<number | null, FrameData[]>();
+    for (const f of perf.frames) {
+      const key = f.performance_dancer_id;
+      if (!framesByDancer.has(key)) framesByDancer.set(key, []);
+      framesByDancer.get(key)!.push(f);
+    }
+
     const render = () => {
       const timeMs = video.currentTime * 1000;
-      const frame = findFrame(timeMs, perf.frames);
-      if (frame) drawSkeleton(frame, canvas);
+      const matchedFrames: FrameData[] = [];
+      for (const [, dancerFrames] of framesByDancer) {
+        const frame = findFrame(timeMs, dancerFrames);
+        if (frame) matchedFrames.push(frame);
+      }
+      drawSkeletons(matchedFrames, canvas);
       animFrameRef.current = requestAnimationFrame(render);
     };
 
     animFrameRef.current = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animFrameRef.current);
-  }, [perf, findFrame, drawSkeleton]);
+  }, [perf, findFrame, drawSkeletons]);
 
   // Resize canvas to match video
   useEffect(() => {
@@ -193,8 +238,6 @@ export default function VideoReview() {
   if (!perf) {
     return <div className="text-center text-gray-400 py-20">Performance not found</div>;
   }
-
-  const analysis = perf.analysis?.[0];
 
   return (
     <div className="space-y-6">
@@ -285,39 +328,124 @@ export default function VideoReview() {
         </div>
       </div>
 
+      {/* Dancer visibility toggles (multi-dancer mode) */}
+      {perf.performance_dancers.length > 1 && (
+        <div className="flex gap-2 flex-wrap">
+          {perf.performance_dancers.map((pd, idx) => {
+            const color = DANCER_COLORS[idx % DANCER_COLORS.length];
+            const visible = visibleDancers.has(pd.id);
+            return (
+              <button
+                key={pd.id}
+                className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm border transition-all ${
+                  visible ? "bg-gray-800 border-gray-600 text-white" : "bg-gray-800/50 border-gray-700 text-gray-500"
+                }`}
+                onClick={() =>
+                  setVisibleDancers((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(pd.id)) next.delete(pd.id);
+                    else next.add(pd.id);
+                    return next;
+                  })
+                }
+              >
+                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: color, opacity: visible ? 1 : 0.3 }} />
+                {pd.label || `Dancer ${idx + 1}`}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* Coaching Feedback */}
-      {analysis && (
+      {perf.performance_dancers.length > 1 ? (
         <section className="rounded-lg bg-gray-800 p-6 space-y-4">
           <h2 className="text-lg font-semibold text-brand-400">Coaching Feedback</h2>
-
-          {/* Scores */}
-          {(analysis.aramandi_score !== null ||
-            analysis.upper_body_score !== null ||
-            analysis.symmetry_score !== null) && (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              {[
-                { label: "Aramandi", value: analysis.aramandi_score },
-                { label: "Upper Body", value: analysis.upper_body_score },
-                { label: "Symmetry", value: analysis.symmetry_score },
-                { label: "Rhythm", value: analysis.rhythm_consistency_score },
-              ].map(
-                (s) =>
-                  s.value !== null && (
-                    <div key={s.label} className="rounded-lg bg-gray-700 p-3 text-center">
-                      <div className="text-2xl font-bold text-brand-400">{s.value}</div>
-                      <div className="text-xs text-gray-400">{s.label}</div>
-                    </div>
-                  )
-              )}
-            </div>
-          )}
-
-          {analysis.llm_summary && (
-            <div className="prose prose-invert max-w-none text-sm text-gray-300 whitespace-pre-wrap leading-relaxed">
-              {analysis.llm_summary}
-            </div>
-          )}
+          {/* Dancer tabs */}
+          <div className="flex gap-2 border-b border-gray-700 pb-2">
+            {perf.performance_dancers.map((pd, idx) => {
+              const color = DANCER_COLORS[idx % DANCER_COLORS.length];
+              return (
+                <button
+                  key={pd.id}
+                  className={`flex items-center gap-2 rounded-t-lg px-4 py-2 text-sm transition-all ${
+                    activeDancerTab === pd.id
+                      ? "bg-gray-700 text-white"
+                      : "text-gray-400 hover:text-white"
+                  }`}
+                  onClick={() => setActiveDancerTab(pd.id)}
+                >
+                  <div className="w-3 h-3 rounded-full" style={{ backgroundColor: color }} />
+                  {pd.label || `Dancer ${idx + 1}`}
+                </button>
+              );
+            })}
+          </div>
+          {/* Active dancer analysis */}
+          {(() => {
+            const analysis = perf.analysis.find((a) => a.performance_dancer_id === activeDancerTab);
+            if (!analysis) return <p className="text-gray-500">No analysis available for this dancer.</p>;
+            return (
+              <>
+                {(analysis.aramandi_score !== null || analysis.upper_body_score !== null || analysis.symmetry_score !== null) && (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    {[
+                      { label: "Aramandi", value: analysis.aramandi_score },
+                      { label: "Upper Body", value: analysis.upper_body_score },
+                      { label: "Symmetry", value: analysis.symmetry_score },
+                      { label: "Rhythm", value: analysis.rhythm_consistency_score },
+                    ].map(
+                      (s) =>
+                        s.value !== null && (
+                          <div key={s.label} className="rounded-lg bg-gray-700 p-3 text-center">
+                            <div className="text-2xl font-bold text-brand-400">{s.value}</div>
+                            <div className="text-xs text-gray-400">{s.label}</div>
+                          </div>
+                        )
+                    )}
+                  </div>
+                )}
+                {analysis.llm_summary && (
+                  <div className="prose prose-invert max-w-none text-sm text-gray-300 whitespace-pre-wrap leading-relaxed">
+                    {analysis.llm_summary}
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </section>
+      ) : (
+        (() => {
+          const analysis = perf.analysis?.[0];
+          return analysis ? (
+            <section className="rounded-lg bg-gray-800 p-6 space-y-4">
+              <h2 className="text-lg font-semibold text-brand-400">Coaching Feedback</h2>
+              {(analysis.aramandi_score !== null || analysis.upper_body_score !== null || analysis.symmetry_score !== null) && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {[
+                    { label: "Aramandi", value: analysis.aramandi_score },
+                    { label: "Upper Body", value: analysis.upper_body_score },
+                    { label: "Symmetry", value: analysis.symmetry_score },
+                    { label: "Rhythm", value: analysis.rhythm_consistency_score },
+                  ].map(
+                    (s) =>
+                      s.value !== null && (
+                        <div key={s.label} className="rounded-lg bg-gray-700 p-3 text-center">
+                          <div className="text-2xl font-bold text-brand-400">{s.value}</div>
+                          <div className="text-xs text-gray-400">{s.label}</div>
+                        </div>
+                      )
+                  )}
+                </div>
+              )}
+              {analysis.llm_summary && (
+                <div className="prose prose-invert max-w-none text-sm text-gray-300 whitespace-pre-wrap leading-relaxed">
+                  {analysis.llm_summary}
+                </div>
+              )}
+            </section>
+          ) : null;
+        })()
       )}
 
       {/* Frame count info */}

@@ -2,9 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.models.performance import Performance
+from app.models.performance import Performance, DetectedPerson, PerformanceDancer
+from app.tasks import dispatch_pipeline
 
-from app.schemas.performance import PerformanceResponse, PerformanceStatusResponse
+from app.schemas.performance import (
+    PerformanceResponse,
+    PerformanceStatusResponse,
+    DetectedPersonResponse,
+    DancerSelectionRequest,
+)
 
 router = APIRouter(prefix="/api/performances", tags=["performances"])
 
@@ -13,7 +19,12 @@ router = APIRouter(prefix="/api/performances", tags=["performances"])
 def get_performance(performance_id: int, db: Session = Depends(get_db)):
     performance = (
         db.query(Performance)
-        .options(joinedload(Performance.frames), joinedload(Performance.analysis))
+        .options(
+            joinedload(Performance.frames),
+            joinedload(Performance.analysis),
+            joinedload(Performance.detected_persons),
+            joinedload(Performance.performance_dancers),
+        )
         .filter(Performance.id == performance_id)
         .first()
     )
@@ -28,6 +39,47 @@ def get_performance_status(performance_id: int, db: Session = Depends(get_db)):
     if not performance:
         raise HTTPException(status_code=404, detail="Performance not found")
     return performance
+
+
+@router.get("/{performance_id}/detected-persons", response_model=list[DetectedPersonResponse])
+def get_detected_persons(performance_id: int, db: Session = Depends(get_db)):
+    performance = db.query(Performance).filter(Performance.id == performance_id).first()
+    if not performance:
+        raise HTTPException(status_code=404, detail="Performance not found")
+    return db.query(DetectedPerson).filter(DetectedPerson.performance_id == performance_id).order_by(DetectedPerson.area.desc()).all()
+
+
+@router.post("/{performance_id}/select-dancers")
+def select_dancers(performance_id: int, body: DancerSelectionRequest, db: Session = Depends(get_db)):
+    performance = db.query(Performance).filter(Performance.id == performance_id).first()
+    if not performance:
+        raise HTTPException(status_code=404, detail="Performance not found")
+    if performance.status != "awaiting_selection":
+        raise HTTPException(status_code=400, detail=f"Performance is not awaiting selection (status: {performance.status})")
+    if not body.selections:
+        raise HTTPException(status_code=400, detail="At least one dancer must be selected")
+
+    # Create PerformanceDancer records
+    selected_tracks = []
+    for sel in body.selections:
+        pd = PerformanceDancer(
+            performance_id=performance_id,
+            track_id=sel.track_id,
+            label=sel.label,
+        )
+        db.add(pd)
+        db.flush()
+        selected_tracks.append({"track_id": sel.track_id, "performance_dancer_id": pd.id, "label": sel.label})
+
+    # Dispatch full pipeline with selected dancers
+    video_path = f"/app/uploads/{performance.video_key}"
+    task_id = dispatch_pipeline(performance_id, video_path, selected_tracks=selected_tracks)
+    performance.task_id = task_id
+    performance.status = "queued"
+    performance.pipeline_progress = {"stage": "queued", "pct": 0.0}
+    db.commit()
+
+    return {"task_id": task_id, "status": "queued", "dancers_selected": len(selected_tracks)}
 
 
 @router.delete("/{performance_id}")

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.dancer import Dancer
 from app.models.performance import Performance
-from app.tasks import dispatch_pipeline
+from app.tasks import dispatch_detection
 from app.schemas.performance import UploadResponse
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
@@ -62,8 +62,8 @@ async def upload_video(
     db.commit()
     db.refresh(performance)
 
-    # Dispatch pipeline
-    task_id = dispatch_pipeline(performance.id, video_path)
+    # Dispatch detection pass (user selects dancers before full pipeline)
+    task_id = dispatch_detection(performance.id, video_path)
     performance.task_id = task_id
     db.commit()
 

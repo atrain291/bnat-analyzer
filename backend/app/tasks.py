@@ -15,14 +15,25 @@ celery_app.conf.update(
     enable_utc=True,
     task_routes={
         "worker.app.tasks.video_pipeline.run_pipeline": {"queue": "video_pipeline"},
+        "worker.app.tasks.detect_dancers.run_detection": {"queue": "video_pipeline"},
     },
 )
 
 
-def dispatch_pipeline(bout_id: int, video_path: str) -> str:
+def dispatch_detection(performance_id: int, video_path: str) -> str:
+    result = celery_app.send_task(
+        "worker.app.tasks.detect_dancers.run_detection",
+        args=[performance_id, video_path],
+        queue="video_pipeline",
+    )
+    return result.id
+
+
+def dispatch_pipeline(performance_id: int, video_path: str, selected_tracks: list[dict] | None = None) -> str:
     result = celery_app.send_task(
         "worker.app.tasks.video_pipeline.run_pipeline",
-        args=[bout_id, video_path],
+        args=[performance_id, video_path],
+        kwargs={"selected_tracks": selected_tracks},
         queue="video_pipeline",
     )
     return result.id
