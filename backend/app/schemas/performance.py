@@ -77,6 +77,19 @@ class PerformanceResponse(BaseModel):
     performance_dancers: list[PerformanceDancerResponse] = []
 
 
+class PerformanceListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    dancer_id: int
+    item_name: str | None
+    item_type: str | None
+    status: str
+    overall_score: float | None = None
+    duration_ms: int | None
+    created_at: datetime
+
+
 class DancerSelectionItem(BaseModel):
     track_id: int
     label: str | None = None

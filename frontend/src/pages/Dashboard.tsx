@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, UserPlus, Music } from "lucide-react";
+import { Upload, UserPlus, Music, PlayCircle, Clock, CheckCircle2, Loader2, AlertCircle } from "lucide-react";
 import { listDancers, createDancer, Dancer } from "../api/dancers";
-import { uploadVideo } from "../api/performances";
+import { uploadVideo, listPerformances, PerformanceListItem } from "../api/performances";
 
 const ITEM_TYPES = [
   "Alarippu",
@@ -35,9 +35,11 @@ export default function Dashboard() {
   const [uploadPct, setUploadPct] = useState(0);
   const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const [performances, setPerformances] = useState<PerformanceListItem[]>([]);
 
   useEffect(() => {
     listDancers().then(setDancers).catch(() => {});
+    listPerformances().then(setPerformances).catch(() => {});
   }, []);
 
   const handleCreateDancer = async () => {
@@ -104,6 +106,66 @@ export default function Dashboard() {
           Upload a Bharatanatyam practice video for AI-powered form analysis
         </p>
       </div>
+
+      {/* Past Performances */}
+      {performances.length > 0 && (
+        <section className="rounded-lg bg-gray-800 p-6 space-y-4">
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+            <PlayCircle size={20} /> Past Performances
+          </h2>
+          <div className="space-y-2">
+            {performances.map((p) => {
+              const dancerName = dancers.find((d) => d.id === p.dancer_id)?.name;
+              const statusIcon =
+                p.status === "complete" ? <CheckCircle2 size={16} className="text-green-400" /> :
+                p.status === "failed" ? <AlertCircle size={16} className="text-red-400" /> :
+                p.status === "processing" || p.status === "detecting" ? <Loader2 size={16} className="text-brand-400 animate-spin" /> :
+                <Clock size={16} className="text-gray-400" />;
+
+              const href =
+                p.status === "complete" ? `/review/${p.id}` :
+                p.status === "awaiting_selection" ? `/select-dancers/${p.id}` :
+                p.status === "failed" ? null :
+                `/processing/${p.id}`;
+
+              return (
+                <div
+                  key={p.id}
+                  className={`flex items-center justify-between rounded-lg bg-gray-700/50 px-4 py-3 ${
+                    href ? "cursor-pointer hover:bg-gray-700" : ""
+                  }`}
+                  onClick={() => href && navigate(href)}
+                >
+                  <div className="flex items-center gap-3">
+                    {statusIcon}
+                    <div>
+                      <div className="text-white font-medium">
+                        {p.item_name || p.item_type || "Untitled"}
+                        {dancerName && <span className="text-gray-400 font-normal"> — {dancerName}</span>}
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        {new Date(p.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                        {p.duration_ms && ` · ${(p.duration_ms / 1000).toFixed(0)}s`}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {p.status === "complete" && p.overall_score !== null && (
+                      <div className="text-right">
+                        <div className="text-lg font-bold text-brand-400">{p.overall_score}</div>
+                        <div className="text-xs text-gray-500">/ 100</div>
+                      </div>
+                    )}
+                    {p.status !== "complete" && p.status !== "failed" && (
+                      <span className="text-xs text-gray-400 capitalize">{p.status.replace("_", " ")}</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {error && (
         <div className="rounded-lg bg-red-900/30 border border-red-700 p-4 text-red-300">

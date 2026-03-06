@@ -5,14 +5,38 @@ from app.database import get_db
 from app.models.performance import Performance, DetectedPerson, PerformanceDancer
 from app.tasks import dispatch_pipeline
 
+from app.models.analysis import Analysis
 from app.schemas.performance import (
     PerformanceResponse,
     PerformanceStatusResponse,
+    PerformanceListItem,
     DetectedPersonResponse,
     DancerSelectionRequest,
 )
 
 router = APIRouter(prefix="/api/performances", tags=["performances"])
+
+
+@router.get("/", response_model=list[PerformanceListItem])
+def list_performances(dancer_id: int | None = None, db: Session = Depends(get_db)):
+    query = db.query(Performance).order_by(Performance.created_at.desc())
+    if dancer_id is not None:
+        query = query.filter(Performance.dancer_id == dancer_id)
+    performances = query.all()
+
+    results = []
+    for perf in performances:
+        # Get overall score from first analysis (or highest among dancers)
+        best_score = db.query(Analysis.overall_score).filter(
+            Analysis.performance_id == perf.id,
+            Analysis.overall_score.isnot(None),
+        ).order_by(Analysis.overall_score.desc()).first()
+
+        item = PerformanceListItem.model_validate(perf)
+        item.overall_score = best_score[0] if best_score else None
+        results.append(item)
+
+    return results
 
 
 @router.get("/{performance_id}", response_model=PerformanceResponse)

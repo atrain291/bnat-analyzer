@@ -83,6 +83,23 @@ export interface Performance {
   performance_dancers: PerformanceDancer[];
 }
 
+export interface PerformanceListItem {
+  id: number;
+  dancer_id: number;
+  item_name: string | null;
+  item_type: string | null;
+  status: string;
+  overall_score: number | null;
+  duration_ms: number | null;
+  created_at: string;
+}
+
+export async function listPerformances(dancerId?: number): Promise<PerformanceListItem[]> {
+  const params = dancerId ? { dancer_id: dancerId } : {};
+  const { data } = await api.get("/performances/", { params });
+  return data;
+}
+
 export async function uploadVideo(
   file: File,
   dancerId: number,
