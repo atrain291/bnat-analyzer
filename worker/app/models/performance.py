@@ -40,6 +40,33 @@ class Frame(Base):
     face: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
+class JointAngleState(Base):
+    __tablename__ = "joint_angle_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    frame_id: Mapped[int] = mapped_column(ForeignKey("frames.id"), unique=True)
+
+    aramandi_angle: Mapped[float | None] = mapped_column(Float, nullable=True)
+    torso_uprightness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    arm_extension_left: Mapped[float | None] = mapped_column(Float, nullable=True)
+    arm_extension_right: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hip_symmetry: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    all_angles: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class BalanceMetrics(Base):
+    __tablename__ = "balance_metrics"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    frame_id: Mapped[int] = mapped_column(ForeignKey("frames.id"), unique=True)
+
+    center_of_mass_x: Mapped[float | None] = mapped_column(Float, nullable=True)
+    center_of_mass_y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    weight_distribution: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stability_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
 class Analysis(Base):
     __tablename__ = "analyses"
 
