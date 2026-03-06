@@ -1,0 +1,100 @@
+version: "3.9"
+
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/app/src:z
+      - ./frontend/index.html:/app/index.html:z
+      - ./frontend/vite.config.ts:/app/vite.config.ts:z
+      - ./frontend/tailwind.config.js:/app/tailwind.config.js:z
+      - ./frontend/postcss.config.js:/app/postcss.config.js:z
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - api
+    networks:
+      - bharatanatyam
+    security_opt:
+      - label=disable
+
+  api:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app:z
+      - uploads:/app/uploads
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - bharatanatyam
+    security_opt:
+      - label=disable
+
+  worker:
+    build: ./worker
+    volumes:
+      - ./worker/app:/app/app:z
+      - uploads:/app/uploads
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    devices:
+      - nvidia.com/gpu=all
+    networks:
+      - bharatanatyam
+    security_opt:
+      - label=disable
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bharatanatyam}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bharatanatyam}
+      POSTGRES_DB: ${POSTGRES_DB:-bharatanatyam_analyzer}
+    volumes:
+      - ${HOME}/bharatanatyam-data/postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - bharatanatyam
+    security_opt:
+      - label=disable
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - ${HOME}/bharatanatyam-data/redis:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - bharatanatyam
+    security_opt:
+      - label=disable
+
+  ollama:
+    image: ollama/ollama:latest
+    devices:
+      - nvidia.com/gpu=all
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - bharatanatyam
+
+volumes:
+  uploads:
+  ollama_data:
+
+networks:
+  bharatanatyam:
+    driver: bridge

@@ -1,0 +1,330 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+import { useParams, useNavigate, Link } from "react-router-dom";
+import { Play, Pause, SkipBack, Trash2, ArrowLeft } from "lucide-react";
+import { getPerformance, deletePerformance, Performance, FrameData } from "../api/performances";
+
+// COCO skeleton connections for Bharatanatyam visualization
+const SKELETON_CONNECTIONS: [string, string][] = [
+  // Torso
+  ["left_shoulder", "right_shoulder"],
+  ["left_shoulder", "left_hip"],
+  ["right_shoulder", "right_hip"],
+  ["left_hip", "right_hip"],
+  // Left arm
+  ["left_shoulder", "left_elbow"],
+  ["left_elbow", "left_wrist"],
+  // Right arm
+  ["right_shoulder", "right_elbow"],
+  ["right_elbow", "right_wrist"],
+  // Left leg
+  ["left_hip", "left_knee"],
+  ["left_knee", "left_ankle"],
+  // Right leg
+  ["right_hip", "right_knee"],
+  ["right_knee", "right_ankle"],
+  // Head
+  ["nose", "left_eye"],
+  ["nose", "right_eye"],
+  ["left_eye", "left_ear"],
+  ["right_eye", "right_ear"],
+  ["nose", "left_shoulder"],
+  ["nose", "right_shoulder"],
+];
+
+const PLAYBACK_SPEEDS = [0.25, 0.5, 1, 1.5, 2];
+
+const SAFFRON = "#F9A825";
+const SAFFRON_DIM = "rgba(249, 168, 37, 0.4)";
+
+export default function VideoReview() {
+  const { performanceId } = useParams<{ performanceId: string }>();
+  const navigate = useNavigate();
+  const [perf, setPerf] = useState<Performance | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(1);
+  const [showSkeleton, setShowSkeleton] = useState(true);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const animFrameRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!performanceId) return;
+    setLoading(true);
+    getPerformance(Number(performanceId))
+      .then(setPerf)
+      .catch(() => navigate("/"))
+      .finally(() => setLoading(false));
+  }, [performanceId, navigate]);
+
+  // Find the closest frame for a given timestamp using binary search
+  const findFrame = useCallback(
+    (timeMs: number, frames: FrameData[]): FrameData | null => {
+      if (!frames.length) return null;
+      let lo = 0;
+      let hi = frames.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (frames[mid].timestamp_ms < timeMs) lo = mid + 1;
+        else hi = mid;
+      }
+      // Pick closest between lo and lo-1
+      if (lo > 0) {
+        const diffLo = Math.abs(frames[lo].timestamp_ms - timeMs);
+        const diffPrev = Math.abs(frames[lo - 1].timestamp_ms - timeMs);
+        if (diffPrev < diffLo) return frames[lo - 1];
+      }
+      return frames[lo];
+    },
+    []
+  );
+
+  const drawSkeleton = useCallback(
+    (frame: FrameData, canvas: HTMLCanvasElement) => {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!showSkeleton) return;
+
+      const pose = frame.dancer_pose;
+      if (!pose || Object.keys(pose).length === 0) return;
+
+      const w = canvas.width;
+      const h = canvas.height;
+
+      // Draw connections
+      ctx.lineWidth = 3;
+      for (const [from, to] of SKELETON_CONNECTIONS) {
+        const a = pose[from];
+        const b = pose[to];
+        if (!a || !b || a.confidence < 0.3 || b.confidence < 0.3) continue;
+
+        const alpha = Math.min(a.confidence, b.confidence);
+        ctx.strokeStyle =
+          alpha > 0.5 ? SAFFRON : SAFFRON_DIM;
+        ctx.beginPath();
+        ctx.moveTo(a.x * w, a.y * h);
+        ctx.lineTo(b.x * w, b.y * h);
+        ctx.stroke();
+      }
+
+      // Draw keypoints
+      for (const [, kp] of Object.entries(pose)) {
+        if (kp.confidence < 0.3) continue;
+        ctx.fillStyle = kp.confidence > 0.5 ? SAFFRON : SAFFRON_DIM;
+        ctx.beginPath();
+        ctx.arc(kp.x * w, kp.y * h, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    },
+    [showSkeleton]
+  );
+
+  // Animation loop
+  useEffect(() => {
+    if (!perf || !perf.frames.length) return;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+
+    const render = () => {
+      const timeMs = video.currentTime * 1000;
+      const frame = findFrame(timeMs, perf.frames);
+      if (frame) drawSkeleton(frame, canvas);
+      animFrameRef.current = requestAnimationFrame(render);
+    };
+
+    animFrameRef.current = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(animFrameRef.current);
+  }, [perf, findFrame, drawSkeleton]);
+
+  // Resize canvas to match video
+  useEffect(() => {
+    const container = containerRef.current;
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    if (!container || !canvas || !video) return;
+
+    const observer = new ResizeObserver(() => {
+      canvas.width = video.clientWidth;
+      canvas.height = video.clientHeight;
+    });
+    observer.observe(video);
+    return () => observer.disconnect();
+  }, [perf]);
+
+  const handlePlayPause = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      video.play();
+      setPlaying(true);
+    } else {
+      video.pause();
+      setPlaying(false);
+    }
+  };
+
+  const handleRestart = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = 0;
+  };
+
+  const handleSpeedChange = (s: number) => {
+    setSpeed(s);
+    if (videoRef.current) videoRef.current.playbackRate = s;
+  };
+
+  const handleDelete = async () => {
+    if (!performanceId || !confirm("Delete this performance and all analysis data?")) return;
+    await deletePerformance(Number(performanceId));
+    navigate("/");
+  };
+
+  if (loading) {
+    return <div className="text-center text-gray-400 py-20">Loading...</div>;
+  }
+
+  if (!perf) {
+    return <div className="text-center text-gray-400 py-20">Performance not found</div>;
+  }
+
+  const analysis = perf.analysis?.[0];
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <Link to="/" className="text-gray-400 hover:text-white">
+            <ArrowLeft size={20} />
+          </Link>
+          <div>
+            <h1 className="text-2xl font-bold text-white">
+              {perf.item_name || "Performance Review"}
+            </h1>
+            <p className="text-sm text-gray-400">
+              {perf.item_type && <span className="capitalize">{perf.item_type}</span>}
+              {perf.talam && <span> | {perf.talam} talam</span>}
+              {perf.ragam && <span> | {perf.ragam}</span>}
+            </p>
+          </div>
+        </div>
+        <button
+          className="flex items-center gap-1 rounded bg-red-800/50 px-3 py-1.5 text-sm text-red-300 hover:bg-red-800"
+          onClick={handleDelete}
+        >
+          <Trash2 size={14} /> Delete
+        </button>
+      </div>
+
+      {/* Video Player with Skeleton Overlay */}
+      <div ref={containerRef} className="relative rounded-lg overflow-hidden bg-black">
+        <video
+          ref={videoRef}
+          src={perf.video_url ?? undefined}
+          className="w-full"
+          onPlay={() => setPlaying(true)}
+          onPause={() => setPlaying(false)}
+          onEnded={() => setPlaying(false)}
+        />
+        <canvas
+          ref={canvasRef}
+          className="absolute top-0 left-0 w-full h-full pointer-events-none"
+        />
+      </div>
+
+      {/* Controls */}
+      <div className="flex items-center justify-between rounded-lg bg-gray-800 p-4">
+        <div className="flex items-center gap-3">
+          <button
+            className="rounded-full bg-brand-600 p-2 text-white hover:bg-brand-700"
+            onClick={handlePlayPause}
+          >
+            {playing ? <Pause size={20} /> : <Play size={20} />}
+          </button>
+          <button
+            className="rounded-full bg-gray-700 p-2 text-gray-300 hover:bg-gray-600"
+            onClick={handleRestart}
+          >
+            <SkipBack size={18} />
+          </button>
+        </div>
+
+        <div className="flex items-center gap-4">
+          <label className="flex items-center gap-2 text-sm text-gray-400">
+            <input
+              type="checkbox"
+              checked={showSkeleton}
+              onChange={(e) => setShowSkeleton(e.target.checked)}
+              className="rounded"
+            />
+            Skeleton
+          </label>
+
+          <div className="flex gap-1">
+            {PLAYBACK_SPEEDS.map((s) => (
+              <button
+                key={s}
+                className={`rounded px-2 py-1 text-xs ${
+                  speed === s
+                    ? "bg-brand-600 text-white"
+                    : "bg-gray-700 text-gray-400 hover:bg-gray-600"
+                }`}
+                onClick={() => handleSpeedChange(s)}
+              >
+                {s}x
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Coaching Feedback */}
+      {analysis && (
+        <section className="rounded-lg bg-gray-800 p-6 space-y-4">
+          <h2 className="text-lg font-semibold text-brand-400">Coaching Feedback</h2>
+
+          {/* Scores */}
+          {(analysis.aramandi_score !== null ||
+            analysis.upper_body_score !== null ||
+            analysis.symmetry_score !== null) && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {[
+                { label: "Aramandi", value: analysis.aramandi_score },
+                { label: "Upper Body", value: analysis.upper_body_score },
+                { label: "Symmetry", value: analysis.symmetry_score },
+                { label: "Rhythm", value: analysis.rhythm_consistency_score },
+              ].map(
+                (s) =>
+                  s.value !== null && (
+                    <div key={s.label} className="rounded-lg bg-gray-700 p-3 text-center">
+                      <div className="text-2xl font-bold text-brand-400">{s.value}</div>
+                      <div className="text-xs text-gray-400">{s.label}</div>
+                    </div>
+                  )
+              )}
+            </div>
+          )}
+
+          {analysis.llm_summary && (
+            <div className="prose prose-invert max-w-none text-sm text-gray-300 whitespace-pre-wrap leading-relaxed">
+              {analysis.llm_summary}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Frame count info */}
+      <div className="text-center text-xs text-gray-500">
+        {perf.frames.length} frames analyzed
+        {perf.duration_ms && ` | ${(perf.duration_ms / 1000).toFixed(1)}s duration`}
+      </div>
+    </div>
+  );
+}
