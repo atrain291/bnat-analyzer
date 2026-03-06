@@ -8,6 +8,16 @@ class Base(DeclarativeBase):
     pass
 
 
+class Dancer(Base):
+    __tablename__ = "dancers"
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+
 class Performance(Base):
     __tablename__ = "performances"
 
