@@ -45,37 +45,144 @@ const DANCER_COLORS = [
 const SAFFRON = "#F9A825";
 const SAFFRON_DIM = "rgba(249, 168, 37, 0.4)";
 
-function ScoreCards({ analysis }: { analysis: AnalysisData }) {
-  const scores = [
-    { label: "Overall", value: analysis.overall_score },
-    { label: "Aramandi", value: analysis.aramandi_score },
-    { label: "Upper Body", value: analysis.upper_body_score },
-    { label: "Symmetry", value: analysis.symmetry_score },
-    { label: "Foot Technique", value: analysis.technique_scores?.foot_technique_score ?? null },
-  ];
+interface ScoreDetail {
+  label: string;
+  value: number | null;
+  measured?: string;
+  ideal?: string;
+  tip?: string;
+}
 
-  const hasScores = scores.some((s) => s.value !== null);
+function getScoreDetails(analysis: AnalysisData): ScoreDetail[] {
+  const inputs = analysis.technique_scores?.inputs as Record<string, number> | undefined;
+
+  const fmt = (v: number | undefined, unit: string, decimals = 1) =>
+    v !== undefined ? `${v.toFixed(decimals)}${unit}` : "N/A";
+
+  return [
+    {
+      label: "Overall",
+      value: analysis.overall_score,
+      measured: "Weighted composite of all scores below",
+      ideal: "100 = perfect across all dimensions",
+      tip: "Focus on your lowest individual score for the biggest improvement.",
+    },
+    {
+      label: "Aramandi",
+      value: analysis.aramandi_score,
+      measured: inputs ? `Avg knee angle: ${fmt(inputs.avg_knee_angle, "°")} (std: ${fmt(inputs.knee_angle_std, "°")})` : undefined,
+      ideal: "105° knee bend with low variance",
+      tip: inputs?.avg_knee_angle !== undefined
+        ? inputs.avg_knee_angle > 140
+          ? "Your knees are too straight. Bend deeper into aramandi — aim for a half-seated position with knees over toes."
+          : inputs.avg_knee_angle < 80
+          ? "You're bending too deep. Ease up slightly — aramandi should feel strong and sustainable, not a full squat."
+          : inputs.knee_angle_std !== undefined && inputs.knee_angle_std > 15
+          ? "Your aramandi depth is inconsistent. Practice holding a steady half-sit to build muscle memory."
+          : "Good aramandi range. Maintain consistency throughout the piece."
+        : undefined,
+    },
+    {
+      label: "Upper Body",
+      value: analysis.upper_body_score,
+      measured: inputs ? `Avg torso deviation: ${fmt(inputs.avg_torso_angle, "°")}` : undefined,
+      ideal: "0° deviation (perfectly upright)",
+      tip: inputs?.avg_torso_angle !== undefined
+        ? inputs.avg_torso_angle > 8
+          ? "Your torso is leaning significantly. Engage your core and imagine a string pulling up from the crown of your head."
+          : inputs.avg_torso_angle > 4
+          ? "Slight torso lean detected. Check your posture in the mirror — even small leans are visible on stage."
+          : "Excellent uprightness. Your torso alignment is strong."
+        : undefined,
+    },
+    {
+      label: "Symmetry",
+      value: analysis.symmetry_score,
+      measured: inputs ? `Hip asymmetry: ${fmt(inputs.hip_symmetry_avg, "", 3)}` : undefined,
+      ideal: "0.0 hip asymmetry (perfectly balanced)",
+      tip: inputs?.hip_symmetry_avg !== undefined
+        ? inputs.hip_symmetry_avg > 0.10
+          ? "Significant hip asymmetry — one side is higher/shifted. Practice in front of a mirror, checking your hip line is level."
+          : inputs.hip_symmetry_avg > 0.05
+          ? "Mild hip asymmetry. Focus on distributing weight evenly between both feet during aramandi."
+          : "Good bilateral symmetry. Your alignment is balanced."
+        : undefined,
+    },
+    {
+      label: "Foot Technique",
+      value: analysis.technique_scores?.foot_technique_score ?? null,
+      measured: inputs
+        ? `Avg turnout: ${fmt(inputs.avg_foot_turnout, "°")} | Flatness: ${fmt(inputs.avg_foot_flatness, "", 4)}`
+        : undefined,
+      ideal: "45–60° turnout, feet flat on floor",
+      tip: inputs?.avg_foot_turnout !== undefined
+        ? inputs.avg_foot_turnout > 70
+          ? "Your feet are turned out too far, which can strain knees. Aim for a natural 45-60° turnout."
+          : inputs.avg_foot_turnout < 30
+          ? "Your feet need more turnout. Rotate from the hips, not just the ankles, for proper Bharatanatyam stance."
+          : inputs.avg_foot_flatness !== undefined && inputs.avg_foot_flatness > 0.03
+          ? "Your feet are lifting off the floor. In aramandi, keep both feet firmly grounded for powerful stamps."
+          : "Good foot positioning. Maintain this turnout and grounding."
+        : undefined,
+    },
+  ];
+}
+
+function ScoreCards({ analysis }: { analysis: AnalysisData }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const details = getScoreDetails(analysis);
+
+  const hasScores = details.some((s) => s.value !== null);
   if (!hasScores) return null;
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-      {scores.map(
-        (s) =>
-          s.value !== null && (
-            <div
-              key={s.label}
-              className={`rounded-lg p-3 text-center ${
-                s.label === "Overall" ? "bg-brand-600/20 border border-brand-500/30" : "bg-gray-700"
-              }`}
-            >
-              <div className="text-2xl font-bold text-brand-400">
-                {s.value}
-                <span className="text-sm font-normal text-gray-500"> / 100</span>
-              </div>
-              <div className="text-xs text-gray-400">{s.label}</div>
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        {details.map(
+          (s) =>
+            s.value !== null && (
+              <button
+                key={s.label}
+                className={`rounded-lg p-3 text-center transition-all ${
+                  s.label === "Overall"
+                    ? "bg-brand-600/20 border border-brand-500/30"
+                    : "bg-gray-700"
+                } ${expanded === s.label ? "ring-2 ring-brand-400" : "hover:ring-1 hover:ring-gray-500"}`}
+                onClick={() => setExpanded(expanded === s.label ? null : s.label)}
+              >
+                <div className="text-2xl font-bold text-brand-400">
+                  {s.value}
+                  <span className="text-sm font-normal text-gray-500"> / 100</span>
+                </div>
+                <div className="text-xs text-gray-400">{s.label}</div>
+              </button>
+            )
+        )}
+      </div>
+      {expanded && (() => {
+        const detail = details.find((s) => s.label === expanded);
+        if (!detail) return null;
+        return (
+          <div className="rounded-lg bg-gray-700/50 border border-gray-600 p-4 space-y-2 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-white">{detail.label} Score Breakdown</span>
+              <button className="text-gray-400 hover:text-white text-xs" onClick={() => setExpanded(null)}>close</button>
             </div>
-          )
-      )}
+            {detail.measured && (
+              <div><span className="text-gray-400">Measured: </span><span className="text-gray-200">{detail.measured}</span></div>
+            )}
+            {detail.ideal && (
+              <div><span className="text-gray-400">Ideal: </span><span className="text-gray-200">{detail.ideal}</span></div>
+            )}
+            {detail.tip && (
+              <div className="mt-2 rounded bg-brand-600/10 border border-brand-500/20 px-3 py-2 text-brand-300">
+                <span className="font-medium">Tip: </span>{detail.tip}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+      <p className="text-xs text-gray-500 text-center">Click any score for details</p>
     </div>
   );
 }
