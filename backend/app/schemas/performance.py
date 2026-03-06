@@ -36,6 +36,25 @@ class AnalysisResponse(BaseModel):
     created_at: datetime
 
 
+class DetectedPersonResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    track_id: int
+    bbox: dict
+    representative_pose: dict
+    frame_count: int
+    area: float
+
+
+class PerformanceDancerResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    track_id: int
+    label: str | None
+
+
 class PerformanceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -56,25 +75,6 @@ class PerformanceResponse(BaseModel):
     analysis: list[AnalysisResponse] = []
     detected_persons: list[DetectedPersonResponse] = []
     performance_dancers: list[PerformanceDancerResponse] = []
-
-
-class DetectedPersonResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    track_id: int
-    bbox: dict
-    representative_pose: dict
-    frame_count: int
-    area: float
-
-
-class PerformanceDancerResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    track_id: int
-    label: str | None
 
 
 class DancerSelectionItem(BaseModel):
