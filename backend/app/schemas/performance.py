@@ -71,7 +71,6 @@ class PerformanceResponse(BaseModel):
     error: str | None
     detection_frame_url: str | None = None
     created_at: datetime
-    frames: list[FrameResponse] = []
     analysis: list[AnalysisResponse] = []
     detected_persons: list[DetectedPersonResponse] = []
     performance_dancers: list[PerformanceDancerResponse] = []

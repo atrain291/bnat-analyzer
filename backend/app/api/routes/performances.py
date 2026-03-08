@@ -10,6 +10,7 @@ from app.schemas.performance import (
     PerformanceResponse,
     PerformanceStatusResponse,
     PerformanceListItem,
+    FrameResponse,
     DetectedPersonResponse,
     DancerSelectionRequest,
 )
@@ -44,7 +45,6 @@ def get_performance(performance_id: int, db: Session = Depends(get_db)):
     performance = (
         db.query(Performance)
         .options(
-            joinedload(Performance.frames),
             joinedload(Performance.analysis),
             joinedload(Performance.detected_persons),
             joinedload(Performance.performance_dancers),
@@ -54,7 +54,24 @@ def get_performance(performance_id: int, db: Session = Depends(get_db)):
     )
     if not performance:
         raise HTTPException(status_code=404, detail="Performance not found")
+    # Frames are loaded separately via /frames endpoint for performance
     return performance
+
+
+@router.get("/{performance_id}/frames", response_model=list[FrameResponse])
+def get_performance_frames(performance_id: int, db: Session = Depends(get_db)):
+    """Return all frames for a performance. Loaded separately for performance."""
+    from app.models.analysis import Frame
+    performance = db.query(Performance).filter(Performance.id == performance_id).first()
+    if not performance:
+        raise HTTPException(status_code=404, detail="Performance not found")
+    frames = (
+        db.query(Frame)
+        .filter(Frame.performance_id == performance_id)
+        .order_by(Frame.timestamp_ms)
+        .all()
+    )
+    return frames
 
 
 @router.get("/{performance_id}/status", response_model=PerformanceStatusResponse)

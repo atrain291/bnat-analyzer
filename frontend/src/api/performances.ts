@@ -77,7 +77,6 @@ export interface Performance {
   error: string | null;
   created_at: string;
   detection_frame_url: string | null;
-  frames: FrameData[];
   analysis: AnalysisData[];
   detected_persons: DetectedPerson[];
   performance_dancers: PerformanceDancer[];
@@ -135,6 +134,11 @@ export async function getPerformanceStatus(id: number): Promise<PerformanceStatu
 
 export async function getPerformance(id: number): Promise<Performance> {
   const { data } = await api.get(`/performances/${id}`);
+  return data;
+}
+
+export async function getPerformanceFrames(id: number): Promise<FrameData[]> {
+  const { data } = await api.get(`/performances/${id}/frames`);
   return data;
 }
 

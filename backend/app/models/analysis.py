@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import String, Integer, Float, DateTime, JSON, ForeignKey
+from sqlalchemy import String, Integer, Float, DateTime, JSON, ForeignKey, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -9,6 +9,9 @@ from app.database import Base
 class Frame(Base):
     """Per-frame pose data for a performance."""
     __tablename__ = "frames"
+    __table_args__ = (
+        Index("ix_frames_performance_id_timestamp", "performance_id", "timestamp_ms"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"))

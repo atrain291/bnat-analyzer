@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { Play, Pause, SkipBack, Trash2, ArrowLeft } from "lucide-react";
-import { getPerformance, deletePerformance, Performance, FrameData, AnalysisData } from "../api/performances";
+import { getPerformance, getPerformanceFrames, deletePerformance, Performance, FrameData, AnalysisData } from "../api/performances";
 
 // COCO skeleton connections for Bharatanatyam visualization
 const SKELETON_CONNECTIONS: [string, string][] = [
@@ -191,7 +191,9 @@ export default function VideoReview() {
   const { performanceId } = useParams<{ performanceId: string }>();
   const navigate = useNavigate();
   const [perf, setPerf] = useState<Performance | null>(null);
+  const [frames, setFrames] = useState<FrameData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [framesLoading, setFramesLoading] = useState(true);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [showSkeleton, setShowSkeleton] = useState(true);
@@ -205,8 +207,12 @@ export default function VideoReview() {
 
   useEffect(() => {
     if (!performanceId) return;
+    const id = Number(performanceId);
     setLoading(true);
-    getPerformance(Number(performanceId))
+    setFramesLoading(true);
+
+    // Load performance metadata (fast) and frames (slow) in parallel
+    getPerformance(id)
       .then((data) => {
         setPerf(data);
         if (data.performance_dancers.length > 0) {
@@ -217,6 +223,11 @@ export default function VideoReview() {
       })
       .catch(() => navigate("/"))
       .finally(() => setLoading(false));
+
+    getPerformanceFrames(id)
+      .then(setFrames)
+      .catch(() => {})
+      .finally(() => setFramesLoading(false));
   }, [performanceId, navigate]);
 
   // Find the closest frame for a given timestamp using binary search
@@ -300,7 +311,7 @@ export default function VideoReview() {
 
   // Animation loop
   useEffect(() => {
-    if (!perf || !perf.frames.length) return;
+    if (!perf || !frames.length) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -308,7 +319,7 @@ export default function VideoReview() {
 
     // Group frames by dancer for multi-dancer rendering
     const framesByDancer = new Map<number | null, FrameData[]>();
-    for (const f of perf.frames) {
+    for (const f of frames) {
       const key = f.performance_dancer_id;
       if (!framesByDancer.has(key)) framesByDancer.set(key, []);
       framesByDancer.get(key)!.push(f);
@@ -558,7 +569,7 @@ export default function VideoReview() {
 
       {/* Frame count info */}
       <div className="text-center text-xs text-gray-500">
-        {perf.frames.length} frames analyzed
+        {framesLoading ? "Loading skeleton data..." : `${frames.length} frames analyzed`}
         {perf.duration_ms && ` | ${(perf.duration_ms / 1000).toFixed(1)}s duration`}
       </div>
     </div>
