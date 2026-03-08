@@ -338,7 +338,7 @@ export default function VideoReview() {
 
     animFrameRef.current = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animFrameRef.current);
-  }, [perf, findFrame, drawSkeletons]);
+  }, [perf, frames, findFrame, drawSkeletons]);
 
   // Resize canvas to match video
   useEffect(() => {
