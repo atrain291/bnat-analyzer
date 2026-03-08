@@ -5,7 +5,7 @@ from celery import current_task
 
 from app.celery_app import app
 from app.db import get_session
-from app.models.performance import Performance, PerformanceDancer, Frame, Analysis, JointAngleState, BalanceMetrics
+from app.models.performance import Performance, PerformanceDancer, DetectedPerson, Frame, Analysis, JointAngleState, BalanceMetrics
 from app.pipeline.ingest import extract_metadata
 from app.pipeline.pose import run_pose_estimation, run_pose_estimation_multi
 from app.pipeline.angles import summarize_pose_statistics, compute_frame_angles
@@ -198,6 +198,16 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
             track_id_to_info = {t["track_id"]: t for t in selected_tracks}
             selected_ids = set(track_id_to_info.keys())
 
+            # Fetch detection bboxes to seed the tracker with known positions
+            seed_bboxes = {}
+            with get_session() as session:
+                detected = session.query(DetectedPerson).filter(
+                    DetectedPerson.performance_id == performance_id
+                ).all()
+                for dp in detected:
+                    bbox = dp.bbox
+                    seed_bboxes[dp.track_id] = (bbox["x_min"], bbox["y_min"], bbox["x_max"], bbox["y_max"])
+
             def pose_progress(current_frame: int, total: int):
                 pct = 20.0 + (current_frame / max(total, 1)) * 60.0
                 _update_progress(performance_id, "pose_estimation", pct, frame=current_frame, total_frames=total)
@@ -205,7 +215,7 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
             _update_progress(performance_id, "pose_estimation", 20.0, frame=0, total_frames=total_frames)
             per_dancer_frames = run_pose_estimation_multi(
                 video_path, metadata, selected_ids, progress_callback=pose_progress,
-                is_cancelled=is_cancelled,
+                is_cancelled=is_cancelled, seed_bboxes=seed_bboxes,
             )
 
             # Store frames per dancer

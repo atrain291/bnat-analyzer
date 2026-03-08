@@ -57,6 +57,16 @@ class SimpleTracker:
         self.active_tracks: dict[int, tuple] = {}  # track_id -> last bbox
         self.missing_count: dict[int, int] = {}  # track_id -> frames since last seen
 
+    def seed(self, known_bboxes: dict[int, tuple]):
+        """Seed the tracker with known track_id -> bbox mappings from a prior detection pass.
+
+        This ensures the first frame's detections are matched to the correct IDs.
+        """
+        for tid, bbox in known_bboxes.items():
+            self.active_tracks[tid] = bbox
+            self.missing_count[tid] = 0
+        self.next_id = max(known_bboxes.keys()) + 1 if known_bboxes else 0
+
     def update(self, bboxes: list[tuple]) -> list[int]:
         """Assign track IDs to a list of bounding boxes for one frame.
 

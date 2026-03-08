@@ -366,8 +366,13 @@ def run_pose_estimation_multi(
     tracker_class=None,
     progress_callback: Callable[[int, int], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
+    seed_bboxes: dict[int, tuple] | None = None,
 ) -> dict[int, list[dict]]:
     """Run pose estimation on all frames, tracking selected persons only.
+
+    Args:
+        seed_bboxes: {track_id: (x_min, y_min, x_max, y_max)} from detection pass.
+            Seeds the tracker so it assigns the same IDs as the detection pass.
 
     Returns {track_id: [frame_data_dicts]} for selected tracks only.
     """
@@ -375,6 +380,10 @@ def run_pose_estimation_multi(
 
     model = _init_model()
     tracker = SimpleTracker()
+
+    # Seed tracker with known positions from detection pass
+    if seed_bboxes:
+        tracker.seed(seed_bboxes)
 
     fps = metadata["fps"]
     width = metadata["width"]
