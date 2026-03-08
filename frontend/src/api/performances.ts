@@ -151,6 +151,22 @@ export async function deletePerformance(id: number): Promise<void> {
   await api.delete(`/performances/${id}`);
 }
 
+export interface TimelineFrame {
+  timestamp_ms: number;
+  performance_dancer_id: number | null;
+  aramandi_angle: number | null;
+  torso_uprightness: number | null;
+  arm_extension_left: number | null;
+  arm_extension_right: number | null;
+  hip_symmetry: number | null;
+  stability_score: number | null;
+}
+
+export async function getPerformanceTimeline(id: number): Promise<TimelineFrame[]> {
+  const { data } = await api.get(`/performances/${id}/timeline`);
+  return data;
+}
+
 export async function getDetectedPersons(id: number): Promise<DetectedPerson[]> {
   const { data } = await api.get(`/performances/${id}/detected-persons`);
   return data;

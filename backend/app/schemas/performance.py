@@ -89,6 +89,19 @@ class PerformanceListItem(BaseModel):
     created_at: datetime
 
 
+class TimelineFrameResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    timestamp_ms: int
+    performance_dancer_id: int | None = None
+    aramandi_angle: float | None = None
+    torso_uprightness: float | None = None
+    arm_extension_left: float | None = None
+    arm_extension_right: float | None = None
+    hip_symmetry: float | None = None
+    stability_score: float | None = None
+
+
 class DancerSelectionItem(BaseModel):
     track_id: int
     label: str | None = None

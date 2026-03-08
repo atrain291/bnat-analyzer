@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { Play, Pause, SkipBack, Trash2, ArrowLeft } from "lucide-react";
-import { getPerformance, getPerformanceFrames, deletePerformance, Performance, FrameData, AnalysisData } from "../api/performances";
+import { getPerformance, getPerformanceFrames, getPerformanceTimeline, deletePerformance, Performance, FrameData, AnalysisData, TimelineFrame } from "../api/performances";
 
 // COCO skeleton connections for Bharatanatyam visualization
 const SKELETON_CONNECTIONS: [string, string][] = [
@@ -43,7 +43,6 @@ const DANCER_COLORS = [
 ];
 
 const SAFFRON = "#F9A825";
-const SAFFRON_DIM = "rgba(249, 168, 37, 0.4)";
 
 interface ScoreDetail {
   label: string;
@@ -187,6 +186,240 @@ function ScoreCards({ analysis }: { analysis: AnalysisData }) {
   );
 }
 
+// --- Movement classification from per-frame angles ---
+
+type MoveType = "aramandi" | "standing" | "arms_extended" | "transition" | "unknown";
+
+const MOVE_COLORS: Record<MoveType, string> = {
+  aramandi: "#F9A825",      // saffron
+  standing: "#4CAF50",      // green
+  arms_extended: "#2196F3", // blue
+  transition: "#9E9E9E",    // gray
+  unknown: "#424242",       // dark gray
+};
+
+const MOVE_LABELS: Record<MoveType, string> = {
+  aramandi: "Aramandi",
+  standing: "Standing",
+  arms_extended: "Arms Extended",
+  transition: "Transition",
+  unknown: "Unknown",
+};
+
+function classifyMove(f: TimelineFrame): MoveType {
+  if (f.aramandi_angle == null) return "unknown";
+  const knee = f.aramandi_angle;
+  const armL = f.arm_extension_left ?? 0;
+  const armR = f.arm_extension_right ?? 0;
+  const avgArm = (armL + armR) / 2;
+
+  if (knee <= 130) return "aramandi";
+  if (avgArm > 150) return "arms_extended";
+  if (knee > 160) return "standing";
+  return "transition";
+}
+
+interface MoveSegment {
+  move: MoveType;
+  startMs: number;
+  endMs: number;
+}
+
+function buildSegments(frames: TimelineFrame[]): MoveSegment[] {
+  if (!frames.length) return [];
+  const segments: MoveSegment[] = [];
+  let current: MoveSegment = { move: classifyMove(frames[0]), startMs: frames[0].timestamp_ms, endMs: frames[0].timestamp_ms };
+
+  for (let i = 1; i < frames.length; i++) {
+    const move = classifyMove(frames[i]);
+    if (move === current.move) {
+      current.endMs = frames[i].timestamp_ms;
+    } else {
+      segments.push(current);
+      current = { move, startMs: frames[i].timestamp_ms, endMs: frames[i].timestamp_ms };
+    }
+  }
+  segments.push(current);
+
+  // Merge very short segments (< 200ms) into neighbors
+  const merged: MoveSegment[] = [];
+  for (const seg of segments) {
+    if (merged.length > 0 && seg.endMs - seg.startMs < 200) {
+      merged[merged.length - 1].endMs = seg.endMs;
+    } else {
+      merged.push({ ...seg });
+    }
+  }
+  return merged;
+}
+
+function computeSyncScore(framesA: TimelineFrame[], framesB: TimelineFrame[]): { syncPercent: number; perSecond: { timeSec: number; sync: number }[] } {
+  if (!framesA.length || !framesB.length) return { syncPercent: 0, perSecond: [] };
+
+  // Build a map of timestamp -> move for dancer B
+  const bMoves = new Map<number, MoveType>();
+  for (const f of framesB) {
+    bMoves.set(f.timestamp_ms, classifyMove(f));
+  }
+
+  let matchCount = 0;
+  const buckets = new Map<number, { match: number; total: number }>();
+
+  for (const f of framesA) {
+    const moveA = classifyMove(f);
+    // Find closest B frame
+    const moveB = bMoves.get(f.timestamp_ms);
+    const timeSec = Math.floor(f.timestamp_ms / 1000);
+    if (!buckets.has(timeSec)) buckets.set(timeSec, { match: 0, total: 0 });
+    const bucket = buckets.get(timeSec)!;
+    bucket.total++;
+    if (moveB && moveA === moveB) {
+      matchCount++;
+      bucket.match++;
+    }
+  }
+
+  const syncPercent = Math.round((matchCount / framesA.length) * 100);
+  const perSecond = Array.from(buckets.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([timeSec, { match, total }]) => ({ timeSec, sync: total > 0 ? match / total : 0 }));
+
+  return { syncPercent, perSecond };
+}
+
+interface DanceTimelineProps {
+  timelineData: TimelineFrame[];
+  dancers: { id: number; label: string | null }[];
+  durationMs: number;
+  currentTimeMs: number;
+  onSeek: (timeMs: number) => void;
+}
+
+function DanceTimeline({ timelineData, dancers, durationMs, currentTimeMs, onSeek }: DanceTimelineProps) {
+  if (!timelineData.length || !durationMs) return null;
+
+  // Group by dancer
+  const byDancer = new Map<number | null, TimelineFrame[]>();
+  for (const f of timelineData) {
+    const key = f.performance_dancer_id;
+    if (!byDancer.has(key)) byDancer.set(key, []);
+    byDancer.get(key)!.push(f);
+  }
+
+  const dancerIds = dancers.length > 0 ? dancers.map((d) => d.id) : [null as number | null];
+  const segmentsByDancer = new Map<number | null, MoveSegment[]>();
+  for (const did of dancerIds) {
+    const frames = byDancer.get(did) ?? [];
+    segmentsByDancer.set(did, buildSegments(frames));
+  }
+
+  // Compute sync between first two dancers if multi-dancer
+  let syncInfo: { syncPercent: number; perSecond: { timeSec: number; sync: number }[] } | null = null;
+  if (dancerIds.length >= 2 && dancerIds[0] != null && dancerIds[1] != null) {
+    syncInfo = computeSyncScore(byDancer.get(dancerIds[0]) ?? [], byDancer.get(dancerIds[1]) ?? []);
+  }
+
+  const playheadPct = durationMs > 0 ? (currentTimeMs / durationMs) * 100 : 0;
+
+  // Collect unique moves present
+  const usedMoves = new Set<MoveType>();
+  for (const [, segs] of segmentsByDancer) {
+    for (const seg of segs) usedMoves.add(seg.move);
+  }
+
+  return (
+    <div className="rounded-lg bg-gray-800 p-4 space-y-3">
+      <h3 className="text-sm font-semibold text-gray-300">Movement Timeline</h3>
+
+      {dancerIds.map((did, dIdx) => {
+        const segments = segmentsByDancer.get(did) ?? [];
+        const dancer = dancers.find((d) => d.id === did);
+        const color = did != null ? DANCER_COLORS[dIdx % DANCER_COLORS.length] : SAFFRON;
+
+        return (
+          <div key={did ?? "solo"} className="space-y-1">
+            <div className="flex items-center gap-2">
+              <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
+              <span className="text-xs text-gray-400">{dancer?.label || `Dancer ${dIdx + 1}`}</span>
+            </div>
+            <div
+              className="relative h-6 bg-gray-700 rounded cursor-pointer overflow-hidden"
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const pct = (e.clientX - rect.left) / rect.width;
+                onSeek(pct * durationMs);
+              }}
+            >
+              {segments.map((seg, i) => {
+                const left = (seg.startMs / durationMs) * 100;
+                const width = Math.max(0.3, ((seg.endMs - seg.startMs) / durationMs) * 100);
+                return (
+                  <div
+                    key={i}
+                    className="absolute top-0 h-full opacity-80 hover:opacity-100 transition-opacity"
+                    style={{ left: `${left}%`, width: `${width}%`, backgroundColor: MOVE_COLORS[seg.move] }}
+                    title={`${MOVE_LABELS[seg.move]} (${((seg.endMs - seg.startMs) / 1000).toFixed(1)}s)`}
+                  />
+                );
+              })}
+              {/* Playhead */}
+              <div className="absolute top-0 h-full w-0.5 bg-white z-10" style={{ left: `${playheadPct}%` }} />
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Synchronicity bar */}
+      {syncInfo && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-400">Synchronicity</span>
+            <span className="text-xs font-medium text-brand-400">{syncInfo.syncPercent}%</span>
+          </div>
+          <div
+            className="relative h-3 bg-gray-700 rounded cursor-pointer overflow-hidden"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const pct = (e.clientX - rect.left) / rect.width;
+              onSeek(pct * durationMs);
+            }}
+          >
+            {syncInfo.perSecond.map((ps) => {
+              const left = (ps.timeSec * 1000 / durationMs) * 100;
+              const width = Math.max(0.2, (1000 / durationMs) * 100);
+              const green = Math.round(ps.sync * 200 + 55);
+              const red = Math.round((1 - ps.sync) * 200 + 55);
+              return (
+                <div
+                  key={ps.timeSec}
+                  className="absolute top-0 h-full"
+                  style={{
+                    left: `${left}%`,
+                    width: `${width}%`,
+                    backgroundColor: `rgb(${red}, ${green}, 80)`,
+                  }}
+                  title={`${ps.timeSec}s: ${Math.round(ps.sync * 100)}% sync`}
+                />
+              );
+            })}
+            <div className="absolute top-0 h-full w-0.5 bg-white z-10" style={{ left: `${playheadPct}%` }} />
+          </div>
+        </div>
+      )}
+
+      {/* Legend */}
+      <div className="flex flex-wrap gap-3 pt-1">
+        {Array.from(usedMoves).map((move) => (
+          <div key={move} className="flex items-center gap-1.5">
+            <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: MOVE_COLORS[move] }} />
+            <span className="text-xs text-gray-400">{MOVE_LABELS[move]}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function VideoReview() {
   const { performanceId } = useParams<{ performanceId: string }>();
   const navigate = useNavigate();
@@ -196,7 +429,10 @@ export default function VideoReview() {
   const [framesLoading, setFramesLoading] = useState(true);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
-  const [showSkeleton, setShowSkeleton] = useState(true);
+
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [timelineData, setTimelineData] = useState<TimelineFrame[]>([]);
   const [activeDancerTab, setActiveDancerTab] = useState<number | null>(null);
   const [visibleDancers, setVisibleDancers] = useState<Set<number>>(new Set());
 
@@ -228,6 +464,10 @@ export default function VideoReview() {
       .then(setFrames)
       .catch(() => {})
       .finally(() => setFramesLoading(false));
+
+    getPerformanceTimeline(id)
+      .then(setTimelineData)
+      .catch(() => {});
   }, [performanceId, navigate]);
 
   // Find the closest frame for a given timestamp using binary search
@@ -267,7 +507,6 @@ export default function VideoReview() {
       if (!ctx) return;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (!showSkeleton) return;
 
       const w = canvas.width;
       const h = canvas.height;
@@ -306,7 +545,7 @@ export default function VideoReview() {
       }
       ctx.globalAlpha = 1.0;
     },
-    [showSkeleton, visibleDancers, getDancerColor]
+    [visibleDancers, getDancerColor]
   );
 
   // Animation loop
@@ -384,6 +623,20 @@ export default function VideoReview() {
     navigate("/");
   };
 
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const time = parseFloat(e.target.value);
+    if (videoRef.current) {
+      videoRef.current.currentTime = time;
+      setCurrentTime(time);
+    }
+  };
+
+  const formatTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
+
   if (loading) {
     return <div className="text-center text-gray-400 py-20">Loading...</div>;
   }
@@ -428,6 +681,8 @@ export default function VideoReview() {
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onEnded={() => setPlaying(false)}
+          onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime ?? 0)}
+          onLoadedMetadata={() => setDuration(videoRef.current?.duration ?? 0)}
         />
         <canvas
           ref={canvasRef}
@@ -436,33 +691,47 @@ export default function VideoReview() {
       </div>
 
       {/* Controls */}
-      <div className="flex items-center justify-between rounded-lg bg-gray-800 p-4">
+      <div className="flex flex-col gap-3 rounded-lg bg-gray-800 p-4">
         <div className="flex items-center gap-3">
           <button
-            className="rounded-full bg-brand-600 p-2 text-white hover:bg-brand-700"
+            className="rounded-full bg-brand-600 p-2 text-white hover:bg-brand-700 shrink-0"
             onClick={handlePlayPause}
           >
             {playing ? <Pause size={20} /> : <Play size={20} />}
           </button>
           <button
-            className="rounded-full bg-gray-700 p-2 text-gray-300 hover:bg-gray-600"
+            className="rounded-full bg-gray-700 p-2 text-gray-300 hover:bg-gray-600 shrink-0"
             onClick={handleRestart}
           >
             <SkipBack size={18} />
           </button>
+
+          {/* Seekbar */}
+          <span className="text-xs text-gray-400 tabular-nums shrink-0">
+            {formatTime(currentTime)}
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={duration || 0}
+            step={0.01}
+            value={currentTime}
+            onChange={handleSeek}
+            className="flex-1 h-1.5 cursor-pointer appearance-none rounded-full bg-gray-600
+              [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-3.5
+              [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:rounded-full
+              [&::-webkit-slider-thumb]:bg-brand-400 [&::-webkit-slider-thumb]:hover:bg-brand-300
+              [&::-moz-range-thumb]:h-3.5 [&::-moz-range-thumb]:w-3.5
+              [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-brand-400
+              [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:hover:bg-brand-300
+              [&::-moz-range-track]:bg-gray-600 [&::-moz-range-track]:rounded-full"
+          />
+          <span className="text-xs text-gray-400 tabular-nums shrink-0">
+            {formatTime(duration)}
+          </span>
         </div>
 
-        <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2 text-sm text-gray-400">
-            <input
-              type="checkbox"
-              checked={showSkeleton}
-              onChange={(e) => setShowSkeleton(e.target.checked)}
-              className="rounded"
-            />
-            Skeleton
-          </label>
-
+        <div className="flex items-center justify-end gap-4">
           <div className="flex gap-1">
             {PLAYBACK_SPEEDS.map((s) => (
               <button
@@ -481,8 +750,8 @@ export default function VideoReview() {
         </div>
       </div>
 
-      {/* Dancer visibility toggles (multi-dancer mode) */}
-      {perf.performance_dancers.length > 1 && (
+      {/* Dancer skeleton visibility toggles */}
+      {perf.performance_dancers.length > 0 && (
         <div className="flex gap-2 flex-wrap">
           {perf.performance_dancers.map((pd, idx) => {
             const color = DANCER_COLORS[idx % DANCER_COLORS.length];
@@ -509,6 +778,20 @@ export default function VideoReview() {
           })}
         </div>
       )}
+
+      {/* Dance Move Timeline */}
+      <DanceTimeline
+        timelineData={timelineData}
+        dancers={perf.performance_dancers}
+        durationMs={perf.duration_ms ?? duration * 1000}
+        currentTimeMs={currentTime * 1000}
+        onSeek={(ms) => {
+          if (videoRef.current) {
+            videoRef.current.currentTime = ms / 1000;
+            setCurrentTime(ms / 1000);
+          }
+        }}
+      />
 
       {/* Coaching Feedback */}
       {perf.performance_dancers.length > 1 ? (

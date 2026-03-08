@@ -11,6 +11,7 @@ from app.schemas.performance import (
     PerformanceStatusResponse,
     PerformanceListItem,
     FrameResponse,
+    TimelineFrameResponse,
     DetectedPersonResponse,
     DancerSelectionRequest,
 )
@@ -72,6 +73,48 @@ def get_performance_frames(performance_id: int, db: Session = Depends(get_db)):
         .all()
     )
     return frames
+
+
+@router.get("/{performance_id}/timeline", response_model=list[TimelineFrameResponse])
+def get_performance_timeline(performance_id: int, db: Session = Depends(get_db)):
+    """Return per-frame angle and balance metrics for timeline visualization."""
+    from app.models.analysis import Frame, JointAngleState, BalanceMetrics
+
+    performance = db.query(Performance).filter(Performance.id == performance_id).first()
+    if not performance:
+        raise HTTPException(status_code=404, detail="Performance not found")
+
+    rows = (
+        db.query(
+            Frame.timestamp_ms,
+            Frame.performance_dancer_id,
+            JointAngleState.aramandi_angle,
+            JointAngleState.torso_uprightness,
+            JointAngleState.arm_extension_left,
+            JointAngleState.arm_extension_right,
+            JointAngleState.hip_symmetry,
+            BalanceMetrics.stability_score,
+        )
+        .outerjoin(JointAngleState, JointAngleState.frame_id == Frame.id)
+        .outerjoin(BalanceMetrics, BalanceMetrics.frame_id == Frame.id)
+        .filter(Frame.performance_id == performance_id)
+        .order_by(Frame.timestamp_ms)
+        .all()
+    )
+
+    return [
+        TimelineFrameResponse(
+            timestamp_ms=r.timestamp_ms,
+            performance_dancer_id=r.performance_dancer_id,
+            aramandi_angle=r.aramandi_angle,
+            torso_uprightness=r.torso_uprightness,
+            arm_extension_left=r.arm_extension_left,
+            arm_extension_right=r.arm_extension_right,
+            hip_symmetry=r.hip_symmetry,
+            stability_score=r.stability_score,
+        )
+        for r in rows
+    ]
 
 
 @router.get("/{performance_id}/status", response_model=PerformanceStatusResponse)
