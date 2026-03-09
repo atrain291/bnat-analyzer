@@ -2,43 +2,82 @@
 
 ## Project Overview
 AI-powered Bharatanatyam dance form analysis tool. Upload practice videos and receive:
-- Real-time pose skeleton overlay (saffron/gold color scheme)
-- Joint angle analysis (aramandi depth, torso uprightness, arm extension)
-- AI coaching feedback via Claude API
-- Balance and symmetry metrics
+- Multi-dancer detection and tracking (IoU + centroid + positional fallback)
+- Real-time pose skeleton overlay (color-coded per dancer, 133 keypoints)
+- Per-dancer joint angle analysis (23 body+feet, 42 hands, 68 face)
+- AI coaching feedback via Claude API (per-dancer personalized)
+- Numeric scoring with clickable breakdowns and improvement tips
+- Movement timeline with synchronicity indicators
 
 ## Architecture
-Same architecture as fencing-analyzer, adapted for Bharatanatyam:
-- **Frontend**: React 18 + TypeScript + Vite + Tailwind CSS
-- **Backend**: FastAPI + SQLAlchemy + Alembic (PostgreSQL)
-- **Worker**: Celery + Redis + YOLOv8-Pose + FFmpeg (NVDEC GPU)
+- **Frontend**: React 18 + TypeScript + Vite + Tailwind CSS (port 5173)
+- **Backend**: FastAPI + SQLAlchemy 2.0 + Alembic (PostgreSQL 16, port 8000)
+- **Worker**: Celery + Redis + RTMPose WholeBody + FFmpeg (NVDEC GPU, CUDA 12.4)
 - **LLM**: Claude API for coaching synthesis
-- **Infra**: Podman containers with CDI GPU passthrough
+- **Infra**: Podman-compose with CDI GPU passthrough on Fedora (SELinux)
 
-## Key Domain Adaptations from Fencing Analyzer
-1. **Fencer -> Dancer**: Renamed entity with experience_level field
-2. **Bout -> Performance**: Dance-specific metadata (item_name, item_type, talam, ragam)
-3. **Opponent tracking removed**: Single dancer focus
-4. **Bharatanatyam-specific analysis tables**:
-   - JointAngleState: aramandi_angle, torso_uprightness, arm_extension, hip_symmetry
-   - BalanceMetrics: center_of_mass, weight_distribution, stability_score
-   - MudraState: hand gesture classification (Stage 2+)
-5. **Scoring dimensions**: aramandi, upper_body, symmetry, rhythm_consistency
-6. **UI theme**: Saffron/gold (#F9A825) instead of cyan, lotus flower icon
-7. **LLM prompt**: Bharatanatyam guru persona with dance-specific coaching
+## Pipeline Flow
+1. **Upload** → `dispatch_detection` runs first 50 frames detecting all persons
+2. **Detection** → IoU+centroid tracker with positional fallback assigns stable track IDs
+3. **Selection** → User selects and names dancers on `/select-dancers/:id`
+4. **Pipeline** → Per-dancer pose estimation (tracker seeded with detection bboxes)
+5. **Analysis** → Per-frame angles stored, aggregate statistics computed
+6. **Coaching** → Claude API generates per-dancer feedback with pose summary context
+7. **Scoring** → Numeric 0-100 scores (aramandi, upper body, symmetry, foot, overall)
+8. **Review** → Video with skeleton overlay, seekbar, timeline, score breakdowns
 
-## Development Stages (Roadmap)
+### Early Stop
+- User can stop processing at any point during pose estimation
+- `POST /performances/{id}/stop` sets Redis flag `cancel:{id}`
+- Worker checks every 10 frames, stops reading video, continues through full analysis/scoring on collected frames
 
-| Stage | Status | Features |
-|-------|--------|----------|
-| 1 | Complete (code) | Skeleton overlay, Claude API coaching feedback |
-| 2 | Planned | Mudra (hand gesture) classification using custom model |
-| 3 | Planned | Joint angle computation, aramandi depth scoring |
-| 4 | Planned | Adavu classification and talam synchronization |
-| 5 | Planned | Reference pose comparison, technique scoring |
-| 6 | Planned | Abhinaya (facial expression) analysis |
-| 7 | Planned | Longitudinal tracking across sessions |
-| 8 | Planned | Live camera feed |
+## Pose Analysis Metrics
+**From body+feet (23 keypoints):**
+- Knee angles (aramandi), torso uprightness, arm extension, hip symmetry
+- Foot turnout, foot flatness, foot flexion angle
+- Shoulder elevation (ear-to-shoulder, normalized by torso)
+- Neck lateral tilt (attami — shoulder midpoint to nose)
+
+**From face (68 landmarks):**
+- Head lateral tilt (shirobheda — chin to nose bridge angle)
+- Head forward tilt (nose tip to chin ratio)
+
+**From hands (42 keypoints):**
+- Wrist flexion (elbow → wrist → middle finger base)
+- Finger extension (PIP angles for 4 fingers + thumb per hand)
+
+All metrics stored in `JointAngleState.all_angles` JSON per frame.
+
+## Score System (all 0-100)
+| Score | Weight | What It Measures |
+|-------|--------|------------------|
+| Aramandi | 30% | Knee angle (ideal 105°) + consistency |
+| Upper Body | 20% | Torso deviation from vertical (ideal 0°) |
+| Symmetry | 25% | Hip symmetry + arm/foot balance |
+| Foot Technique | 25% | Turnout angle (ideal 45-60°) + flatness |
+| Overall | — | Weighted composite |
+
+Score cards are clickable → show raw measurements, ideal values, actionable tips.
+
+## Database Tables (10)
+`dancers`, `sessions`, `performances`, `frames`, `joint_angle_states`, `balance_metrics`, `mudra_states`, `analyses`, `detected_persons`, `performance_dancers`
+
+All FKs have ON DELETE CASCADE at both ORM and DB levels.
+
+## API Endpoints
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/performances/` | List performances (optional `dancer_id` filter) |
+| GET | `/api/performances/{id}` | Performance metadata + analysis (no frames) |
+| GET | `/api/performances/{id}/frames` | All frames with pose data |
+| GET | `/api/performances/{id}/timeline` | Per-frame angles/balance for timeline |
+| GET | `/api/performances/{id}/status` | Polling during processing |
+| POST | `/api/performances/{id}/stop` | Early stop processing |
+| DELETE | `/api/performances/{id}` | Cascade delete |
+| GET | `/api/performances/{id}/detected-persons` | Detection results |
+| POST | `/api/performances/{id}/select-dancers` | Dancer selection |
+| POST | `/api/upload/` | Video upload |
+| GET/POST | `/api/dancers/` | Dancer CRUD |
 
 ## First-Time Setup
 
@@ -50,18 +89,20 @@ cp .env.example .env
 # 2. Configure GPU passthrough (if Nvidia)
 sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 
-# 3. Build containers
-podman build --security-opt seccomp=unconfined --security-opt label=disable -t bharatanatyam-frontend frontend/
-podman build --security-opt seccomp=unconfined --security-opt label=disable -t bharatanatyam-backend backend/
-podman build --security-opt seccomp=unconfined --security-opt label=disable -t bharatanatyam-worker worker/
-
-# 4. Start all services
+# 3. Build and start all services
+podman-compose build
 podman-compose up -d
 
-# 5. Run database migrations
-podman exec bharatanatyam_api alembic revision --autogenerate -m "initial"
-podman exec bharatanatyam_api alembic upgrade head
+# 4. Run database migrations
+podman exec -e PYTHONPATH=/app -w /app source1_api_1 alembic upgrade head
 ```
+
+## Development Notes
+- Worker doesn't auto-reload; needs `podman restart source1_worker_1` after code changes
+- API container has `--reload` (uvicorn watches files)
+- Frontend has Vite HMR via volume mount
+- SELinux: `~/.config/containers/containers.conf` with `[containers] label = false`
+- Data volumes: `$HOME/bharatanatyam-data/postgres` and `redis`
 
 ## File Structure
 ```
@@ -75,16 +116,14 @@ bharatanatyam-analyzer/
 │   │   ├── config.py            # Settings
 │   │   ├── database.py          # SQLAlchemy engine
 │   │   ├── tasks.py             # Celery dispatcher
-│   │   ├── models/              # ORM models
+│   │   ├── models/
 │   │   │   ├── dancer.py
-│   │   │   ├── performance.py
-│   │   │   └── analysis.py
-│   │   ├── schemas/             # Pydantic schemas
-│   │   │   ├── dancer.py
-│   │   │   └── performance.py
+│   │   │   ├── performance.py   # Performance, DetectedPerson, PerformanceDancer
+│   │   │   └── analysis.py      # Frame, JointAngleState, BalanceMetrics, MudraState, Analysis
+│   │   ├── schemas/performance.py
 │   │   └── api/routes/
 │   │       ├── dancers.py
-│   │       ├── performances.py
+│   │       ├── performances.py  # List, get, frames, timeline, status, stop, delete, select
 │   │       └── upload.py
 │   ├── alembic/
 │   └── requirements.txt
@@ -92,20 +131,44 @@ bharatanatyam-analyzer/
 │   ├── app/
 │   │   ├── celery_app.py
 │   │   ├── db.py
-│   │   ├── tasks/video_pipeline.py
+│   │   ├── tasks/
+│   │   │   ├── video_pipeline.py   # Main pipeline (single + multi-dancer)
+│   │   │   └── detect_dancers.py   # Detection pass (first 50 frames)
 │   │   ├── pipeline/
-│   │   │   ├── ingest.py        # FFprobe metadata
-│   │   │   ├── pose.py          # YOLOv8-Pose + NVDEC
-│   │   │   └── llm.py           # Claude API coaching
+│   │   │   ├── ingest.py           # FFprobe metadata
+│   │   │   ├── pose.py             # RTMPose WholeBody 133-pt + NVDEC
+│   │   │   ├── angles.py           # Joint angle computation (body+face+hands)
+│   │   │   ├── scoring.py          # Numeric scoring (0-100)
+│   │   │   ├── tracker.py          # IoU + centroid + positional tracker
+│   │   │   └── llm.py              # Claude API coaching
 │   │   └── models/
 │   └── requirements.txt
 └── frontend/
     └── src/
         ├── App.tsx
         ├── pages/
-        │   ├── Dashboard.tsx       # Upload UI with dance metadata
-        │   ├── ProcessingStatus.tsx # Pipeline progress
-        │   └── VideoReview.tsx     # Skeleton overlay + coaching
+        │   ├── Dashboard.tsx          # Upload + performances list
+        │   ├── ProcessingStatus.tsx    # Pipeline progress + stop button
+        │   ├── DancerSelection.tsx     # Multi-dancer selection
+        │   └── VideoReview.tsx         # Skeleton overlay, seekbar, timeline, scores, coaching
         ├── components/Layout.tsx
-        └── api/                    # Axios API client
+        └── api/
+            ├── client.ts              # Axios instance
+            ├── dancers.ts
+            └── performances.ts        # All performance API calls
 ```
+
+## Roadmap
+| Feature | Status |
+|---------|--------|
+| Skeleton overlay + coaching | Done |
+| Multi-dancer detection/tracking | Done |
+| Per-dancer scoring with breakdowns | Done |
+| Stop & partial analysis | Done |
+| Video scrubber + skeleton toggles | Done |
+| Movement timeline + synchronicity | Done |
+| Extended pose metrics (head/wrist/fingers/shoulders/neck) | Done |
+| Mudra classification | Not started (table + finger data ready) |
+| Adavu classification | Not started |
+| Music synchronicity | Not started (needs audio/beat detection) |
+| Multi-camera 3D reconstruction | Not started |
