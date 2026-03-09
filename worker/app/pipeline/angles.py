@@ -1,8 +1,8 @@
 """Compute joint angles and pose statistics from COCO-WholeBody keypoints.
 
 Provides per-frame angle computation and aggregate statistics
-for feeding into the LLM coaching prompt. Supports 23 body+feet keypoints
-from RTMPose WholeBody (133-point model).
+for feeding into the LLM coaching prompt. Uses body+feet (23 keypoints),
+hands (42 keypoints), and face (68 landmarks) from RTMPose WholeBody (133-point model).
 """
 
 import math
@@ -31,7 +31,87 @@ def _angle_between(p1: dict, p2: dict, p3: dict) -> float | None:
     return math.degrees(math.acos(cos_angle))
 
 
-def compute_frame_angles(pose: dict) -> dict:
+def _head_tilt_angles(face: list) -> dict:
+    """Compute head tilt angles from 68-point face landmarks.
+
+    Returns dict with:
+      - head_lateral_tilt: degrees from vertical (0 = upright, positive = tilted right)
+      - head_forward_tilt: ratio indicating forward/back pitch (lower = more forward)
+    """
+    if not face or len(face) < 31:
+        return {}
+
+    min_conf = 0.3
+    chin = face[8]       # Bottom of chin
+    nose_top = face[27]  # Top of nose bridge
+    nose_tip = face[30]  # Tip of nose
+
+    if any(p.get("confidence", 0) < min_conf for p in [chin, nose_top, nose_tip]):
+        return {}
+
+    result = {}
+
+    # Lateral tilt (roll): angle of chin-to-nose_top line from vertical
+    dx = nose_top["x"] - chin["x"]
+    dy = nose_top["y"] - chin["y"]
+    if abs(dy) > 1e-6 or abs(dx) > 1e-6:
+        result["head_lateral_tilt"] = math.degrees(math.atan2(dx, -dy))
+
+    # Forward/back tilt (pitch): ratio of nose_tip-to-chin vs nose_top-to-chin
+    dist_tip_chin = math.sqrt(
+        (nose_tip["x"] - chin["x"]) ** 2 + (nose_tip["y"] - chin["y"]) ** 2
+    )
+    dist_top_chin = math.sqrt(
+        (nose_top["x"] - chin["x"]) ** 2 + (nose_top["y"] - chin["y"]) ** 2
+    )
+    if dist_top_chin > 1e-6:
+        result["head_forward_tilt"] = dist_tip_chin / dist_top_chin
+
+    return result
+
+
+def _compute_finger_extension(hand: dict) -> dict:
+    """Compute finger extension angles for a single hand.
+
+    Returns dict with per-finger PIP angles and average extension.
+    ~180° = fully extended, ~90° = curled.
+    """
+    if not hand:
+        return {}
+
+    results = {}
+    pip_angles = []
+
+    for finger in ("index", "middle", "ring", "pinky"):
+        angle = _angle_between(
+            hand.get(f"{finger}_mcp", {}),
+            hand.get(f"{finger}_pip", {}),
+            hand.get(f"{finger}_dip", {}),
+        )
+        if angle is not None:
+            results[f"{finger}_pip_angle"] = angle
+            pip_angles.append(angle)
+
+    if pip_angles:
+        results["avg_finger_extension"] = sum(pip_angles) / len(pip_angles)
+
+    thumb_angle = _angle_between(
+        hand.get("thumb_mcp", {}),
+        hand.get("thumb_ip", {}),
+        hand.get("thumb_tip", {}),
+    )
+    if thumb_angle is not None:
+        results["thumb_extension"] = thumb_angle
+
+    return results
+
+
+def compute_frame_angles(
+    pose: dict,
+    face: list | None = None,
+    left_hand: dict | None = None,
+    right_hand: dict | None = None,
+) -> dict:
     """Compute Bharatanatyam-relevant angles from a single frame's keypoints.
 
     Returns a dict with angle measurements (degrees). Missing keypoints
@@ -109,6 +189,53 @@ def compute_frame_angles(pose: dict) -> dict:
         else:
             angles["hip_symmetry"] = hip_diff
 
+    # --- Shoulder elevation (ear-to-shoulder distance, normalized by torso) ---
+    # Higher value = more relaxed (good), lower = raised/tense shoulders (bad)
+    le = pose.get("left_ear", {})
+    re = pose.get("right_ear", {})
+
+    for side, ear, shoulder, hip in [
+        ("left", le, ls, lh),
+        ("right", re, rs, rh),
+    ]:
+        if (ear.get("confidence", 0) > 0.3
+                and shoulder.get("confidence", 0) > 0.3):
+            ear_to_shoulder = ear["y"] - shoulder["y"]
+            if hip.get("confidence", 0) > 0.3:
+                torso_side_len = math.sqrt(
+                    (shoulder["x"] - hip["x"]) ** 2 + (shoulder["y"] - hip["y"]) ** 2
+                )
+                if torso_side_len > 1e-6:
+                    angles[f"{side}_shoulder_elevation"] = ear_to_shoulder / torso_side_len
+                else:
+                    angles[f"{side}_shoulder_elevation"] = ear_to_shoulder
+            else:
+                angles[f"{side}_shoulder_elevation"] = ear_to_shoulder
+
+    l_elev = angles.get("left_shoulder_elevation")
+    r_elev = angles.get("right_shoulder_elevation")
+    if l_elev is not None and r_elev is not None:
+        angles["shoulder_elevation_avg"] = (l_elev + r_elev) / 2
+    elif l_elev is not None:
+        angles["shoulder_elevation_avg"] = l_elev
+    elif r_elev is not None:
+        angles["shoulder_elevation_avg"] = r_elev
+
+    # --- Neck lateral tilt (attami): shoulder-midpoint to nose angle from vertical ---
+    # 0° = head centered, positive = tilted right, negative = tilted left
+    nose = pose.get("nose", {})
+    if (nose.get("confidence", 0) > 0.3
+            and ls.get("confidence", 0) > 0.3
+            and rs.get("confidence", 0) > 0.3):
+        mid_sx = (ls["x"] + rs["x"]) / 2
+        mid_sy = (ls["y"] + rs["y"]) / 2
+        neck_dx = nose["x"] - mid_sx
+        neck_dy = nose["y"] - mid_sy
+        if abs(neck_dy) > 1e-6:
+            tilt = math.degrees(math.atan2(neck_dx, -neck_dy))
+            angles["neck_lateral_tilt"] = tilt
+            angles["neck_lateral_tilt_abs"] = abs(tilt)
+
     # --- Foot angles (require WholeBody 133-point keypoints) ---
 
     # Foot turnout: angle formed by heel-big_toe line relative to forward axis
@@ -141,6 +268,31 @@ def compute_frame_angles(pose: dict) -> dict:
             if foot_angle is not None:
                 angles[f"{side}_foot_angle"] = foot_angle
 
+    # --- Head tilt (shirobheda) from face landmarks ---
+    if face:
+        head_angles = _head_tilt_angles(face)
+        angles.update(head_angles)
+
+    # --- Wrist flexion (elbow → hand_wrist → middle_mcp) ---
+    # ~180° = straight wrist, <180° = flexed
+    for side, hand in (("left", left_hand), ("right", right_hand)):
+        if not hand:
+            continue
+        elbow = pose.get(f"{side}_elbow", {})
+        hand_wrist = hand.get("wrist", {})
+        middle_mcp = hand.get("middle_mcp", {})
+        wrist_flexion = _angle_between(elbow, hand_wrist, middle_mcp)
+        if wrist_flexion is not None:
+            angles[f"{side}_wrist_flexion"] = wrist_flexion
+
+    # --- Finger extension (PIP angles per hand) ---
+    for side, hand in (("left", left_hand), ("right", right_hand)):
+        finger_data = _compute_finger_extension(hand)
+        if "avg_finger_extension" in finger_data:
+            angles[f"{side}_finger_extension"] = finger_data["avg_finger_extension"]
+        if "thumb_extension" in finger_data:
+            angles[f"{side}_thumb_extension"] = finger_data["thumb_extension"]
+
     return angles
 
 
@@ -162,13 +314,30 @@ def summarize_pose_statistics(frames_data: list[dict]) -> dict:
     foot_turnout_right = []
     foot_flatness_left = []
     foot_flatness_right = []
+    head_lateral = []
+    head_forward = []
+    wrist_flexion_left = []
+    wrist_flexion_right = []
+    finger_ext_left = []
+    finger_ext_right = []
+    thumb_ext_left = []
+    thumb_ext_right = []
+    shoulder_elev_left = []
+    shoulder_elev_right = []
+    shoulder_elev_avg = []
+    neck_tilt_abs = []
 
     for frame in frames_data:
         pose = frame.get("dancer_pose", {})
         if not pose:
             continue
 
-        angles = compute_frame_angles(pose)
+        angles = compute_frame_angles(
+            pose,
+            face=frame.get("face"),
+            left_hand=frame.get("left_hand"),
+            right_hand=frame.get("right_hand"),
+        )
 
         if "avg_knee_angle" in angles:
             knee_angles.append(angles["avg_knee_angle"])
@@ -188,6 +357,30 @@ def summarize_pose_statistics(frames_data: list[dict]) -> dict:
             foot_flatness_left.append(angles["left_foot_flatness"])
         if "right_foot_flatness" in angles:
             foot_flatness_right.append(angles["right_foot_flatness"])
+        if "head_lateral_tilt" in angles:
+            head_lateral.append(angles["head_lateral_tilt"])
+        if "head_forward_tilt" in angles:
+            head_forward.append(angles["head_forward_tilt"])
+        if "left_wrist_flexion" in angles:
+            wrist_flexion_left.append(angles["left_wrist_flexion"])
+        if "right_wrist_flexion" in angles:
+            wrist_flexion_right.append(angles["right_wrist_flexion"])
+        if angles.get("left_finger_extension") is not None:
+            finger_ext_left.append(angles["left_finger_extension"])
+        if angles.get("right_finger_extension") is not None:
+            finger_ext_right.append(angles["right_finger_extension"])
+        if angles.get("left_thumb_extension") is not None:
+            thumb_ext_left.append(angles["left_thumb_extension"])
+        if angles.get("right_thumb_extension") is not None:
+            thumb_ext_right.append(angles["right_thumb_extension"])
+        if "left_shoulder_elevation" in angles:
+            shoulder_elev_left.append(angles["left_shoulder_elevation"])
+        if "right_shoulder_elevation" in angles:
+            shoulder_elev_right.append(angles["right_shoulder_elevation"])
+        if "shoulder_elevation_avg" in angles:
+            shoulder_elev_avg.append(angles["shoulder_elevation_avg"])
+        if "neck_lateral_tilt_abs" in angles:
+            neck_tilt_abs.append(angles["neck_lateral_tilt_abs"])
 
     summary = {}
 
@@ -225,6 +418,45 @@ def summarize_pose_statistics(frames_data: list[dict]) -> dict:
     if foot_flatness_left and foot_flatness_right:
         all_flatness = foot_flatness_left + foot_flatness_right
         summary["avg_foot_flatness"] = sum(all_flatness) / len(all_flatness)
+
+    # Head tilt / shirobheda
+    if head_lateral:
+        summary["avg_head_lateral_tilt"] = sum(head_lateral) / len(head_lateral)
+        summary["avg_head_lateral_tilt_abs"] = sum(abs(v) for v in head_lateral) / len(head_lateral)
+    if head_forward:
+        summary["avg_head_forward_tilt"] = sum(head_forward) / len(head_forward)
+
+    # Wrist flexion (degrees, ~180 = straight, <180 = flexed)
+    if wrist_flexion_left:
+        summary["avg_wrist_flexion_left"] = sum(wrist_flexion_left) / len(wrist_flexion_left)
+    if wrist_flexion_right:
+        summary["avg_wrist_flexion_right"] = sum(wrist_flexion_right) / len(wrist_flexion_right)
+    if wrist_flexion_left and wrist_flexion_right:
+        all_wrist = wrist_flexion_left + wrist_flexion_right
+        summary["avg_wrist_flexion"] = sum(all_wrist) / len(all_wrist)
+
+    # Finger extension (degrees, ~180 = extended, ~90 = curled)
+    if finger_ext_left:
+        summary["avg_finger_extension_left"] = sum(finger_ext_left) / len(finger_ext_left)
+    if finger_ext_right:
+        summary["avg_finger_extension_right"] = sum(finger_ext_right) / len(finger_ext_right)
+    if thumb_ext_left:
+        summary["avg_thumb_extension_left"] = sum(thumb_ext_left) / len(thumb_ext_left)
+    if thumb_ext_right:
+        summary["avg_thumb_extension_right"] = sum(thumb_ext_right) / len(thumb_ext_right)
+
+    # Shoulder elevation (higher = more relaxed, better)
+    if shoulder_elev_left:
+        summary["avg_shoulder_elevation_left"] = sum(shoulder_elev_left) / len(shoulder_elev_left)
+    if shoulder_elev_right:
+        summary["avg_shoulder_elevation_right"] = sum(shoulder_elev_right) / len(shoulder_elev_right)
+    if shoulder_elev_avg:
+        summary["avg_shoulder_elevation"] = sum(shoulder_elev_avg) / len(shoulder_elev_avg)
+
+    # Neck lateral tilt / attami (degrees)
+    if neck_tilt_abs:
+        summary["avg_neck_lateral_tilt"] = sum(neck_tilt_abs) / len(neck_tilt_abs)
+        summary["max_neck_lateral_tilt"] = max(neck_tilt_abs)
 
     # Composite balance score (0-1)
     balance_components = []

@@ -75,7 +75,12 @@ def _store_frames_and_metrics(session, performance_id, performance_dancer_id, fr
         if not pose:
             continue
 
-        angles = compute_frame_angles(pose)
+        angles = compute_frame_angles(
+            pose,
+            face=fd.get("face"),
+            left_hand=fd.get("left_hand"),
+            right_hand=fd.get("right_hand"),
+        )
         if not angles:
             continue
 
