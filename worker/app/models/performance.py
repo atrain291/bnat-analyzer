@@ -35,6 +35,8 @@ class Performance(Base):
     task_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     error: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     pipeline_progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    beat_timestamps: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    tempo_bpm: Mapped[float | None] = mapped_column(Float, nullable=True)
     detection_frame_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -51,6 +53,11 @@ class Frame(Base):
     right_hand: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     face: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
+    # WHAM 3D data
+    joints_3d: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 24x3 SMPL joints in world/camera coords
+    world_position: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {x, y, z} pelvis position
+    foot_contact: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {left_heel, left_toe, right_heel, right_toe}
+
 
 class JointAngleState(Base):
     __tablename__ = "joint_angle_states"
@@ -63,6 +70,13 @@ class JointAngleState(Base):
     arm_extension_left: Mapped[float | None] = mapped_column(Float, nullable=True)
     arm_extension_right: Mapped[float | None] = mapped_column(Float, nullable=True)
     hip_symmetry: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # WHAM 3D angles
+    knee_angle_3d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    torso_angle_3d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hip_abduction_left: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hip_abduction_right: Mapped[float | None] = mapped_column(Float, nullable=True)
+    torso_twist: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     all_angles: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
@@ -77,6 +91,11 @@ class BalanceMetrics(Base):
     center_of_mass_y: Mapped[float | None] = mapped_column(Float, nullable=True)
     weight_distribution: Mapped[float | None] = mapped_column(Float, nullable=True)
     stability_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # WHAM 3D center of mass
+    center_of_mass_3d_x: Mapped[float | None] = mapped_column(Float, nullable=True)
+    center_of_mass_3d_y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    center_of_mass_3d_z: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class DetectedPerson(Base):

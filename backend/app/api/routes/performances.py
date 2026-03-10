@@ -88,11 +88,15 @@ def get_performance_timeline(performance_id: int, db: Session = Depends(get_db))
         db.query(
             Frame.timestamp_ms,
             Frame.performance_dancer_id,
+            Frame.foot_contact,
             JointAngleState.aramandi_angle,
             JointAngleState.torso_uprightness,
             JointAngleState.arm_extension_left,
             JointAngleState.arm_extension_right,
             JointAngleState.hip_symmetry,
+            JointAngleState.knee_angle_3d,
+            JointAngleState.torso_angle_3d,
+            JointAngleState.torso_twist,
             BalanceMetrics.stability_score,
         )
         .outerjoin(JointAngleState, JointAngleState.frame_id == Frame.id)
@@ -112,6 +116,11 @@ def get_performance_timeline(performance_id: int, db: Session = Depends(get_db))
             arm_extension_right=r.arm_extension_right,
             hip_symmetry=r.hip_symmetry,
             stability_score=r.stability_score,
+            knee_angle_3d=r.knee_angle_3d,
+            torso_angle_3d=r.torso_angle_3d,
+            torso_twist=r.torso_twist,
+            foot_contact_left=(r.foot_contact or {}).get("left_heel"),
+            foot_contact_right=(r.foot_contact or {}).get("right_heel"),
         )
         for r in rows
     ]

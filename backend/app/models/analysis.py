@@ -28,6 +28,11 @@ class Frame(Base):
     # 68-point face landmarks: [{x, y, confidence}, ...]
     face: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
+    # WHAM 3D data
+    joints_3d: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 24x3 SMPL joints in world/camera coords
+    world_position: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {x, y, z} pelvis position
+    foot_contact: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {left_heel, left_toe, right_heel, right_toe}
+
     performance: Mapped["Performance"] = relationship(back_populates="frames")  # noqa: F821
     performance_dancer: Mapped["PerformanceDancer | None"] = relationship(back_populates="frames")  # noqa: F821
     joint_angle_state: Mapped["JointAngleState | None"] = relationship(back_populates="frame", uselist=False, cascade="all, delete-orphan")
@@ -49,6 +54,13 @@ class JointAngleState(Base):
     arm_extension_right: Mapped[float | None] = mapped_column(Float, nullable=True)
     hip_symmetry: Mapped[float | None] = mapped_column(Float, nullable=True)  # hip alignment deviation
 
+    # WHAM 3D angles
+    knee_angle_3d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    torso_angle_3d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hip_abduction_left: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hip_abduction_right: Mapped[float | None] = mapped_column(Float, nullable=True)
+    torso_twist: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Full angle data as JSON for flexibility
     all_angles: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
@@ -66,6 +78,11 @@ class BalanceMetrics(Base):
     center_of_mass_y: Mapped[float | None] = mapped_column(Float, nullable=True)
     weight_distribution: Mapped[float | None] = mapped_column(Float, nullable=True)  # -1 (left) to 1 (right)
     stability_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0-1 composite
+
+    # WHAM 3D center of mass
+    center_of_mass_3d_x: Mapped[float | None] = mapped_column(Float, nullable=True)
+    center_of_mass_3d_y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    center_of_mass_3d_z: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     frame: Mapped["Frame"] = relationship(back_populates="balance_metrics")
 

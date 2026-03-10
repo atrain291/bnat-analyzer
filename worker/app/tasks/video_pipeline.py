@@ -11,6 +11,8 @@ from app.pipeline.pose import run_pose_estimation, run_pose_estimation_multi
 from app.pipeline.angles import summarize_pose_statistics, compute_frame_angles
 from app.pipeline.llm import generate_coaching_feedback
 from app.pipeline.scoring import compute_scores
+from app.pipeline.beat_detection import run_beat_analysis, detect_foot_strikes, score_rhythm_sync
+from app.pipeline.wham import is_wham_available, run_wham_estimation, merge_wham_with_rtmpose
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,9 @@ def _store_frames_and_metrics(session, performance_id, performance_dancer_id, fr
             left_hand=fd.get("left_hand"),
             right_hand=fd.get("right_hand"),
             face=fd.get("face"),
+            joints_3d=fd.get("joints_3d"),
+            world_position=fd.get("world_position"),
+            foot_contact=fd.get("foot_contact"),
         )
         batch.append(frame_obj)
         all_frames.append((frame_obj, fd))
@@ -80,6 +85,7 @@ def _store_frames_and_metrics(session, performance_id, performance_dancer_id, fr
             face=fd.get("face"),
             left_hand=fd.get("left_hand"),
             right_hand=fd.get("right_hand"),
+            joints_3d=fd.get("joints_3d"),
         )
         if not angles:
             continue
@@ -91,6 +97,11 @@ def _store_frames_and_metrics(session, performance_id, performance_dancer_id, fr
             arm_extension_left=angles.get("arm_extension_left"),
             arm_extension_right=angles.get("arm_extension_right"),
             hip_symmetry=angles.get("hip_symmetry"),
+            knee_angle_3d=angles.get("knee_angle_3d"),
+            torso_angle_3d=angles.get("torso_angle_3d"),
+            hip_abduction_left=angles.get("hip_abduction_left"),
+            hip_abduction_right=angles.get("hip_abduction_right"),
+            torso_twist=angles.get("torso_twist"),
             all_angles=angles,
         ))
 
@@ -119,12 +130,23 @@ def _store_frames_and_metrics(session, performance_id, performance_dancer_id, fr
         if stability_components:
             stability = sum(stability_components) / len(stability_components)
 
+        # 3D center of mass from WHAM joints (pelvis = joint 0)
+        j3d = fd.get("joints_3d")
+        com_3d_x = com_3d_y = com_3d_z = None
+        if j3d and len(j3d) >= 1:
+            com_3d_x = float(j3d[0][0])
+            com_3d_y = float(j3d[0][1])
+            com_3d_z = float(j3d[0][2])
+
         balance_batch.append(BalanceMetrics(
             frame_id=frame_obj.id,
             center_of_mass_x=com_x,
             center_of_mass_y=com_y,
             weight_distribution=weight_dist,
             stability_score=stability,
+            center_of_mass_3d_x=com_3d_x,
+            center_of_mass_3d_y=com_3d_y,
+            center_of_mass_3d_z=com_3d_z,
         ))
 
         if len(angle_batch) >= BATCH_SIZE:
@@ -144,9 +166,24 @@ def _store_frames_and_metrics(session, performance_id, performance_dancer_id, fr
     return len(all_frames)
 
 
-def _analyze_dancer(performance_id, performance_dancer_id, label, frames_data, metadata):
-    """Run statistics, LLM coaching, and scoring for one dancer's frames."""
+def _analyze_dancer(performance_id, performance_dancer_id, label, frames_data, metadata, beat_data=None):
+    """Run statistics, LLM coaching, scoring, and rhythm analysis for one dancer's frames."""
     pose_summary = summarize_pose_statistics(frames_data)
+
+    # Rhythm scoring: correlate foot strikes with audio onsets
+    rhythm_score = None
+    rhythm_details = {}
+    if beat_data and beat_data.get("onset_timestamps_ms"):
+        fps = metadata.get("fps", 30.0)
+        foot_strikes = detect_foot_strikes(frames_data, fps)
+        sync_result = score_rhythm_sync(beat_data["onset_timestamps_ms"], foot_strikes)
+        rhythm_score = sync_result.get("rhythm_score")
+        rhythm_details = sync_result
+        if rhythm_score is not None:
+            pose_summary["rhythm_score"] = rhythm_score
+            pose_summary["rhythm_match_rate"] = sync_result.get("match_rate", 0)
+            pose_summary["rhythm_avg_offset_ms"] = sync_result.get("avg_offset_ms")
+            pose_summary["tempo_bpm"] = beat_data.get("tempo_bpm")
 
     with get_session() as session:
         perf = session.query(Performance).filter(Performance.id == performance_id).first()
@@ -154,7 +191,6 @@ def _analyze_dancer(performance_id, performance_dancer_id, label, frames_data, m
         item_type = perf.item_type if perf else None
         talam = perf.talam if perf else None
 
-    dancer_context = f" for dancer '{label}'" if label else ""
     coaching_text = generate_coaching_feedback(
         frame_count=len(frames_data),
         duration_ms=metadata["duration_ms"],
@@ -167,6 +203,13 @@ def _analyze_dancer(performance_id, performance_dancer_id, label, frames_data, m
 
     scores = compute_scores(pose_summary)
 
+    # Include rhythm details in technique_scores
+    if rhythm_details:
+        scores["technique_scores"]["rhythm_details"] = rhythm_details
+    if rhythm_score is not None:
+        scores["technique_scores"]["inputs"]["rhythm_score"] = rhythm_score
+        scores["technique_scores"]["inputs"]["tempo_bpm"] = beat_data.get("tempo_bpm")
+
     with get_session() as session:
         analysis = Analysis(
             performance_id=performance_id,
@@ -175,6 +218,7 @@ def _analyze_dancer(performance_id, performance_dancer_id, label, frames_data, m
             aramandi_score=scores["aramandi_score"],
             upper_body_score=scores["upper_body_score"],
             symmetry_score=scores["symmetry_score"],
+            rhythm_consistency_score=rhythm_score,
             overall_score=scores["overall_score"],
             technique_scores=scores["technique_scores"],
         )
@@ -197,6 +241,21 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
 
         total_frames = metadata["total_frames"]
         is_cancelled = _make_cancel_checker(performance_id)
+
+        # Stage 1b: Audio beat detection (fast, CPU-only, runs before pose estimation)
+        _update_progress(performance_id, "beat_detection", 10.0)
+        beat_data = None
+        try:
+            beat_data = run_beat_analysis(video_path, metadata)
+            if beat_data:
+                with get_session() as session:
+                    perf = session.query(Performance).filter(Performance.id == performance_id).first()
+                    if perf:
+                        perf.beat_timestamps = beat_data["onset_timestamps_ms"]
+                        perf.tempo_bpm = beat_data["tempo_bpm"]
+                logger.info(f"Beat detection: {beat_data['onset_count']} onsets at {beat_data['tempo_bpm']} BPM")
+        except Exception as e:
+            logger.warning(f"Beat detection failed (non-fatal): {e}")
 
         if selected_tracks:
             # Multi-dancer mode
@@ -223,6 +282,20 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                 is_cancelled=is_cancelled, seed_bboxes=seed_bboxes,
             )
 
+            # Stage 2b: WHAM 3D estimation for multi-dancer (optional, non-fatal)
+            if is_wham_available():
+                _update_progress(performance_id, "wham_3d", 78.0)
+                try:
+                    wham_frames = run_wham_estimation(video_path, metadata, is_cancelled=is_cancelled)
+                    # Merge WHAM data into each dancer's frames
+                    for track_id in per_dancer_frames:
+                        per_dancer_frames[track_id] = merge_wham_with_rtmpose(
+                            per_dancer_frames[track_id], wham_frames
+                        )
+                    logger.info("WHAM: Merged 3D data into multi-dancer frames")
+                except Exception as e:
+                    logger.warning(f"WHAM 3D estimation failed (non-fatal): {e}")
+
             # Store frames per dancer
             _update_progress(performance_id, "pose_analysis", 80.0)
             total_stored = 0
@@ -241,7 +314,7 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                 if frames_data:
                     _analyze_dancer(
                         performance_id, info["performance_dancer_id"],
-                        info.get("label"), frames_data, metadata,
+                        info.get("label"), frames_data, metadata, beat_data=beat_data,
                     )
 
         else:
@@ -253,12 +326,22 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
             _update_progress(performance_id, "pose_estimation", 20.0, frame=0, total_frames=total_frames)
             frames_data = run_pose_estimation(video_path, metadata, progress_callback=pose_progress, is_cancelled=is_cancelled)
 
+            # Stage 2b: WHAM 3D estimation (optional, non-fatal)
+            if is_wham_available():
+                _update_progress(performance_id, "wham_3d", 80.0)
+                try:
+                    wham_frames = run_wham_estimation(video_path, metadata, is_cancelled=is_cancelled)
+                    frames_data = merge_wham_with_rtmpose(frames_data, wham_frames)
+                    logger.info(f"WHAM: Merged 3D data into {len(frames_data)} frames")
+                except Exception as e:
+                    logger.warning(f"WHAM 3D estimation failed (non-fatal): {e}")
+
             with get_session() as session:
                 _store_frames_and_metrics(session, performance_id, None, frames_data)
 
             _update_progress(performance_id, "pose_analysis", 83.0)
             _update_progress(performance_id, "llm_synthesis", 85.0)
-            _analyze_dancer(performance_id, None, None, frames_data, metadata)
+            _analyze_dancer(performance_id, None, None, frames_data, metadata, beat_data=beat_data)
 
         # Complete
         _update_progress(performance_id, "scoring", 95.0)

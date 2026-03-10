@@ -9,4 +9,6 @@ numpy==1.26.4
 anthropic==0.40.0
 python-dotenv==1.0.1
 pydantic-settings==2.7.0
+librosa>=0.10.0
+soundfile>=0.12.0
 pytest==8.3.4

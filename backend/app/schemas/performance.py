@@ -18,6 +18,9 @@ class FrameResponse(BaseModel):
     timestamp_ms: int
     dancer_pose: dict
     performance_dancer_id: int | None = None
+    joints_3d: list | None = None
+    world_position: dict | None = None
+    foot_contact: dict | None = None
 
 
 class AnalysisResponse(BaseModel):
@@ -69,6 +72,8 @@ class PerformanceResponse(BaseModel):
     status: str
     pipeline_progress: dict | None
     error: str | None
+    beat_timestamps: list | None = None
+    tempo_bpm: float | None = None
     detection_frame_url: str | None = None
     created_at: datetime
     analysis: list[AnalysisResponse] = []
@@ -100,6 +105,11 @@ class TimelineFrameResponse(BaseModel):
     arm_extension_right: float | None = None
     hip_symmetry: float | None = None
     stability_score: float | None = None
+    knee_angle_3d: float | None = None
+    torso_angle_3d: float | None = None
+    torso_twist: float | None = None
+    foot_contact_left: float | None = None
+    foot_contact_right: float | None = None
 
 
 class DancerSelectionItem(BaseModel):

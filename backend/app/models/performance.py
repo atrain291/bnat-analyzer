@@ -45,6 +45,10 @@ class Performance(Base):
     pipeline_progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # Audio / rhythm
+    beat_timestamps: Mapped[list | None] = mapped_column(JSON, nullable=True)  # [{timestamp_ms, confidence}]
+    tempo_bpm: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Detection
     detection_frame_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 

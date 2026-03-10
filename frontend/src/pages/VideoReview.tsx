@@ -124,6 +124,23 @@ function getScoreDetails(analysis: AnalysisData): ScoreDetail[] {
           : "Good foot positioning. Maintain this turnout and grounding."
         : undefined,
     },
+    {
+      label: "Rhythm",
+      value: analysis.rhythm_consistency_score != null ? Math.round(analysis.rhythm_consistency_score) : null,
+      measured: inputs?.rhythm_score !== undefined
+        ? `Match rate: ${fmt((analysis.technique_scores?.rhythm_details as Record<string, number> | undefined)?.match_rate, "%", 0)} | Avg offset: ${fmt((analysis.technique_scores?.rhythm_details as Record<string, number> | undefined)?.avg_offset_ms, "ms", 0)}${inputs.tempo_bpm ? ` | Tempo: ${fmt(inputs.tempo_bpm, " BPM", 0)}` : ""}`
+        : undefined,
+      ideal: "100% foot strikes aligned with musical onsets within 75ms",
+      tip: analysis.rhythm_consistency_score != null
+        ? analysis.rhythm_consistency_score < 30
+          ? "Your foot strikes are rarely aligned with the music. Practice with a metronome or nattuvangam recording, focusing on landing stamps on each beat."
+          : analysis.rhythm_consistency_score < 60
+          ? "Some strikes land on beat, but timing is inconsistent. Slow down and practice each jathi phrase until stamps consistently match the syllables."
+          : analysis.rhythm_consistency_score < 80
+          ? "Good rhythmic sense. Fine-tune by listening closely to the mridangam strokes and aligning your thattu (stamps) precisely."
+          : "Excellent rhythm — your foot strikes closely match the musical onsets."
+        : undefined,
+    },
   ];
 }
 
@@ -136,7 +153,7 @@ function ScoreCards({ analysis }: { analysis: AnalysisData }) {
 
   return (
     <div className="space-y-2">
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         {details.map(
           (s) =>
             s.value !== null && (
@@ -292,10 +309,12 @@ interface DanceTimelineProps {
   dancers: { id: number; label: string | null }[];
   durationMs: number;
   currentTimeMs: number;
+  beatTimestamps: number[] | null;
+  tempoBpm: number | null;
   onSeek: (timeMs: number) => void;
 }
 
-function DanceTimeline({ timelineData, dancers, durationMs, currentTimeMs, onSeek }: DanceTimelineProps) {
+function DanceTimeline({ timelineData, dancers, durationMs, currentTimeMs, beatTimestamps, tempoBpm, onSeek }: DanceTimelineProps) {
   if (!timelineData.length || !durationMs) return null;
 
   // Group by dancer
@@ -399,6 +418,38 @@ function DanceTimeline({ timelineData, dancers, durationMs, currentTimeMs, onSee
                     backgroundColor: `rgb(${red}, ${green}, 80)`,
                   }}
                   title={`${ps.timeSec}s: ${Math.round(ps.sync * 100)}% sync`}
+                />
+              );
+            })}
+            <div className="absolute top-0 h-full w-0.5 bg-white z-10" style={{ left: `${playheadPct}%` }} />
+          </div>
+        </div>
+      )}
+
+      {/* Beat markers */}
+      {beatTimestamps && beatTimestamps.length > 0 && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-400">Beat / Onset Markers</span>
+            {tempoBpm && <span className="text-xs font-medium text-brand-400">{tempoBpm} BPM</span>}
+            <span className="text-xs text-gray-500">{beatTimestamps.length} onsets</span>
+          </div>
+          <div
+            className="relative h-4 bg-gray-700 rounded cursor-pointer overflow-hidden"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const pct = (e.clientX - rect.left) / rect.width;
+              onSeek(pct * durationMs);
+            }}
+          >
+            {beatTimestamps.map((ts, i) => {
+              const left = (ts / durationMs) * 100;
+              return (
+                <div
+                  key={i}
+                  className="absolute top-0 w-px h-full bg-yellow-400 opacity-50 hover:opacity-100"
+                  style={{ left: `${left}%` }}
+                  title={`Onset ${i + 1}: ${(ts / 1000).toFixed(2)}s`}
                 />
               );
             })}
@@ -785,6 +836,8 @@ export default function VideoReview() {
         dancers={perf.performance_dancers}
         durationMs={perf.duration_ms ?? duration * 1000}
         currentTimeMs={currentTime * 1000}
+        beatTimestamps={perf.beat_timestamps}
+        tempoBpm={perf.tempo_bpm}
         onSeek={(ms) => {
           if (videoRef.current) {
             videoRef.current.currentTime = ms / 1000;

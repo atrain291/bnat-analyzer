@@ -16,7 +16,8 @@ def _score_aramandi(pose_summary: dict) -> float:
     Linear dropoff to 0 at 45 deg (too deep) and 0 at 180 deg (straight legs).
     Consistency (low std) provides a small bonus.
     """
-    avg_knee = pose_summary.get("avg_knee_angle")
+    # Prefer 3D knee angle from WHAM when available, fall back to 2D
+    avg_knee = pose_summary.get("avg_knee_angle_3d") or pose_summary.get("avg_knee_angle")
     if avg_knee is None:
         return 0.0
 
@@ -29,7 +30,7 @@ def _score_aramandi(pose_summary: dict) -> float:
         score = max(0.0, (180.0 - avg_knee) / (180.0 - ideal)) * 100.0
 
     # Penalize inconsistency: high std means the dancer isn't holding aramandi
-    knee_std = pose_summary.get("knee_angle_std", 0.0)
+    knee_std = pose_summary.get("knee_angle_3d_std") or pose_summary.get("knee_angle_std", 0.0)
     if knee_std is not None and knee_std > 5.0:
         # Deduct up to 20 points for high variance (std > 30 = full penalty)
         penalty = min(20.0, (knee_std - 5.0) / 25.0 * 20.0)
@@ -44,7 +45,8 @@ def _score_upper_body(pose_summary: dict) -> float:
     Perfect upright = 0 deg deviation = 100.
     Linear dropoff: 0 at 15 degrees deviation.
     """
-    avg_torso = pose_summary.get("avg_torso_angle")
+    # Prefer 3D torso angle from WHAM when available, fall back to 2D
+    avg_torso = pose_summary.get("avg_torso_angle_3d") or pose_summary.get("avg_torso_angle")
     if avg_torso is None:
         return 0.0
 
@@ -60,15 +62,17 @@ def _score_symmetry(pose_summary: dict) -> float:
     """
     components = []
 
-    # Hip symmetry: 100 at 0, 0 at 0.15
-    hip_sym = pose_summary.get("hip_symmetry_avg")
+    # Hip symmetry: 100 at 0, 0 at 0.15 — prefer 3D from WHAM
+    hip_sym = pose_summary.get("avg_hip_symmetry_3d") or pose_summary.get("hip_symmetry_avg")
     if hip_sym is not None:
         hip_score = max(0.0, (0.15 - hip_sym) / 0.15) * 100.0
         components.append(hip_score)
 
-    # Arm extension symmetry: difference between left and right
-    arm_left = pose_summary.get("avg_arm_extension_left")
-    arm_right = pose_summary.get("avg_arm_extension_right")
+    # Arm extension symmetry: difference between left and right — prefer 3D
+    arm_left = (pose_summary.get("avg_arm_extension_left_3d")
+                or pose_summary.get("avg_arm_extension_left"))
+    arm_right = (pose_summary.get("avg_arm_extension_right_3d")
+                 or pose_summary.get("avg_arm_extension_right"))
     if arm_left is not None and arm_right is not None:
         arm_diff = abs(arm_left - arm_right)
         # 0 diff = 100, 30 deg diff = 0
@@ -159,20 +163,41 @@ def compute_scores(pose_summary: dict) -> dict:
         1,
     ))
 
+    # Determine whether 3D values were used for each metric
+    used_3d_knee = pose_summary.get("avg_knee_angle_3d") is not None
+    used_3d_torso = pose_summary.get("avg_torso_angle_3d") is not None
+    used_3d_hip = pose_summary.get("avg_hip_symmetry_3d") is not None
+    used_3d_arms = (pose_summary.get("avg_arm_extension_left_3d") is not None
+                    and pose_summary.get("avg_arm_extension_right_3d") is not None)
+    source_3d = used_3d_knee or used_3d_torso or used_3d_hip or used_3d_arms
+
     technique_scores = {
         "aramandi_score": aramandi,
         "upper_body_score": upper_body,
         "symmetry_score": symmetry,
         "foot_technique_score": foot_technique,
         "overall_score": overall,
-        # Raw inputs for transparency
+        # Raw inputs for transparency — includes both 2D and 3D when available
         "inputs": {
             "avg_knee_angle": pose_summary.get("avg_knee_angle"),
             "knee_angle_std": pose_summary.get("knee_angle_std"),
+            "avg_knee_angle_3d": pose_summary.get("avg_knee_angle_3d"),
+            "knee_angle_3d_std": pose_summary.get("knee_angle_3d_std"),
             "avg_torso_angle": pose_summary.get("avg_torso_angle"),
+            "avg_torso_angle_3d": pose_summary.get("avg_torso_angle_3d"),
             "hip_symmetry_avg": pose_summary.get("hip_symmetry_avg"),
+            "avg_hip_symmetry_3d": pose_summary.get("avg_hip_symmetry_3d"),
+            "avg_arm_extension_left": pose_summary.get("avg_arm_extension_left"),
+            "avg_arm_extension_right": pose_summary.get("avg_arm_extension_right"),
+            "avg_arm_extension_left_3d": pose_summary.get("avg_arm_extension_left_3d"),
+            "avg_arm_extension_right_3d": pose_summary.get("avg_arm_extension_right_3d"),
+            "avg_hip_abduction_left": pose_summary.get("avg_hip_abduction_left"),
+            "avg_hip_abduction_right": pose_summary.get("avg_hip_abduction_right"),
+            "avg_torso_twist": pose_summary.get("avg_torso_twist"),
+            "torso_twist_std": pose_summary.get("torso_twist_std"),
             "avg_foot_turnout": pose_summary.get("avg_foot_turnout"),
             "avg_foot_flatness": pose_summary.get("avg_foot_flatness"),
+            "source_3d": source_3d,
         },
     }
 

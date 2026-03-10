@@ -27,6 +27,9 @@ export interface FrameData {
   timestamp_ms: number;
   dancer_pose: Record<string, { x: number; y: number; z: number; confidence: number }>;
   performance_dancer_id: number | null;
+  joints_3d: number[][] | null;
+  world_position: { x: number; y: number; z: number } | null;
+  foot_contact: { left_heel: number; left_toe: number; right_heel: number; right_toe: number } | null;
 }
 
 export interface AnalysisData {
@@ -76,6 +79,8 @@ export interface Performance {
   pipeline_progress: PipelineProgress | null;
   error: string | null;
   created_at: string;
+  beat_timestamps: number[] | null;
+  tempo_bpm: number | null;
   detection_frame_url: string | null;
   analysis: AnalysisData[];
   detected_persons: DetectedPerson[];
@@ -160,6 +165,11 @@ export interface TimelineFrame {
   arm_extension_right: number | null;
   hip_symmetry: number | null;
   stability_score: number | null;
+  knee_angle_3d: number | null;
+  torso_angle_3d: number | null;
+  torso_twist: number | null;
+  foot_contact_left: number | null;
+  foot_contact_right: number | null;
 }
 
 export async function getPerformanceTimeline(id: number): Promise<TimelineFrame[]> {

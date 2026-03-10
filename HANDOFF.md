@@ -46,7 +46,30 @@ AI-powered Bharatanatyam dance form analysis tool. Upload practice videos and re
 - Wrist flexion (elbow → wrist → middle finger base)
 - Finger extension (PIP angles for 4 fingers + thumb per hand)
 
+**From WHAM 3D (24 SMPL joints, optional — when installed):**
+- 3D knee angle (camera-invariant aramandi), 3D torso angle (gravity-relative)
+- 3D arm extension, hip abduction, hip symmetry (catches rotational asymmetry)
+- Torso twist (shoulder vs hip plane in XZ)
+- Foot-ground contact probability (left/right heel + toe)
+
 All metrics stored in `JointAngleState.all_angles` JSON per frame.
+
+## Audio / Beat Detection
+- `worker/app/pipeline/beat_detection.py` — librosa onset detection + foot-strike correlation
+- Extracts audio via FFmpeg → detects percussive onsets (spectral flux) → estimates tempo BPM
+- Foot strikes detected from negative derivative peaks on smoothed foot_flatness time series
+- Rhythm sync score: 60% match rate + 40% timing precision (75ms tolerance), scaled 0-100
+- Beat data stored on Performance: `beat_timestamps` (JSON), `tempo_bpm` (float)
+- Frontend: beat markers bar in DanceTimeline, rhythm score card in ScoreCards
+
+## WHAM 3D Integration (Phase 1)
+- `worker/app/pipeline/wham.py` — wrapper with lazy loading, graceful fallback
+- Runs in local-only mode (no SLAM/DPVO) — produces 3D joints + foot contact
+- Pipeline: RTMPose → WHAM → merge by timestamp → store enriched frames
+- Scoring prefers 3D values with `or` fallback to 2D
+- `technique_scores.inputs.source_3d` flag indicates 3D data was used
+- **Not yet active**: needs WHAM repo clone, ViTPose port to HuggingFace, SMPL model files
+- Env vars: `WHAM_ROOT`, `SMPL_MODEL_PATH`, `WHAM_CHECKPOINT`
 
 ## Score System (all 0-100)
 | Score | Weight | What It Measures |
@@ -137,10 +160,12 @@ bharatanatyam-analyzer/
 │   │   ├── pipeline/
 │   │   │   ├── ingest.py           # FFprobe metadata
 │   │   │   ├── pose.py             # RTMPose WholeBody 133-pt + NVDEC
-│   │   │   ├── angles.py           # Joint angle computation (body+face+hands)
-│   │   │   ├── scoring.py          # Numeric scoring (0-100)
+│   │   │   ├── angles.py           # Joint angle computation (2D + 3D)
+│   │   │   ├── scoring.py          # Numeric scoring (0-100, prefers 3D)
 │   │   │   ├── tracker.py          # IoU + centroid + positional tracker
-│   │   │   └── llm.py              # Claude API coaching
+│   │   │   ├── llm.py              # Claude API coaching
+│   │   │   ├── beat_detection.py   # Audio onset detection + rhythm scoring
+│   │   │   └── wham.py             # WHAM 3D pose wrapper (optional)
 │   │   └── models/
 │   └── requirements.txt
 └── frontend/
@@ -168,7 +193,11 @@ bharatanatyam-analyzer/
 | Video scrubber + skeleton toggles | Done |
 | Movement timeline + synchronicity | Done |
 | Extended pose metrics (head/wrist/fingers/shoulders/neck) | Done |
+| Audio/beat detection + rhythm scoring | Done |
+| WHAM 3D integration (Phase 1 — code + data model) | Done (models not installed) |
+| WHAM 3D activation (Phase 2 — port ViTPose, install models) | Not started |
+| WHAM foot contact rhythm (Phase 2b) | Not started |
+| WHAM global trajectory / stage coverage (Phase 3) | Not started |
 | Mudra classification | Not started (table + finger data ready) |
 | Adavu classification | Not started |
-| Music synchronicity | Not started (needs audio/beat detection) |
 | Multi-camera 3D reconstruction | Not started |

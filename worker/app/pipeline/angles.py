@@ -7,6 +7,8 @@ hands (42 keypoints), and face (68 landmarks) from RTMPose WholeBody (133-point 
 
 import math
 
+import numpy as np
+
 
 def _angle_between(p1: dict, p2: dict, p3: dict) -> float | None:
     """Compute angle at p2 formed by p1-p2-p3 in degrees.
@@ -106,11 +108,69 @@ def _compute_finger_extension(hand: dict) -> dict:
     return results
 
 
+def _angle_3d(p1, p2, p3):
+    """Angle at p2 in the triangle p1-p2-p3, in degrees. Inputs are (3,) numpy arrays."""
+    v1 = p1 - p2
+    v2 = p3 - p2
+    cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
+    return float(np.degrees(np.arccos(np.clip(cos_angle, -1.0, 1.0))))
+
+
+def _compute_3d_angles(joints_3d) -> dict:
+    """Compute 3D angles from SMPL 24-joint positions.
+
+    Args:
+        joints_3d: numpy array of shape (24, 3) with SMPL joint positions.
+
+    Returns:
+        Dict of 3D angle measurements keyed with ``_3d`` suffix where
+        appropriate so they can coexist with 2D values.
+    """
+    j = joints_3d  # shorthand
+    angles = {}
+
+    # --- Knee angles ---
+    left_knee = _angle_3d(j[1], j[4], j[7])    # left_hip → left_knee → left_ankle
+    right_knee = _angle_3d(j[2], j[5], j[8])   # right_hip → right_knee → right_ankle
+    angles["left_knee_angle_3d"] = left_knee
+    angles["right_knee_angle_3d"] = right_knee
+    angles["knee_angle_3d"] = (left_knee + right_knee) / 2
+
+    # --- Torso angle: pelvis→spine3 vs world up [0, 1, 0] ---
+    spine_vec = j[9] - j[0]  # pelvis → spine3
+    up = np.array([0.0, 1.0, 0.0])
+    cos_torso = np.dot(spine_vec, up) / (np.linalg.norm(spine_vec) + 1e-8)
+    angles["torso_angle_3d"] = float(np.degrees(np.arccos(np.clip(cos_torso, -1.0, 1.0))))
+
+    # --- Arm extension ---
+    angles["arm_extension_left_3d"] = _angle_3d(j[16], j[18], j[20])   # shoulder→elbow→wrist
+    angles["arm_extension_right_3d"] = _angle_3d(j[17], j[19], j[21])
+
+    # --- Hip abduction ---
+    angles["hip_abduction_left"] = _angle_3d(j[3], j[1], j[4])    # spine1→left_hip→left_knee
+    angles["hip_abduction_right"] = _angle_3d(j[3], j[2], j[5])   # spine1→right_hip→right_knee
+
+    # --- Hip symmetry (Y-height difference) ---
+    angles["hip_symmetry_3d"] = float(abs(j[1][1] - j[2][1]))
+
+    # --- Torso twist: angle between shoulder line and hip line projected onto XZ plane ---
+    shoulder_line = j[17] - j[16]  # right_shoulder - left_shoulder
+    hip_line = j[2] - j[1]         # right_hip - left_hip
+    # Project onto XZ plane (keep X and Z, drop Y)
+    s_xz = np.array([shoulder_line[0], shoulder_line[2]])
+    h_xz = np.array([hip_line[0], hip_line[2]])
+    cos_twist = np.dot(s_xz, h_xz) / (np.linalg.norm(s_xz) * np.linalg.norm(h_xz) + 1e-8)
+    angles["torso_twist"] = float(np.degrees(np.arccos(np.clip(cos_twist, -1.0, 1.0))))
+
+    return angles
+
+
 def compute_frame_angles(
     pose: dict,
     face: list | None = None,
     left_hand: dict | None = None,
     right_hand: dict | None = None,
+    joints_3d=None,
 ) -> dict:
     """Compute Bharatanatyam-relevant angles from a single frame's keypoints.
 
@@ -293,6 +353,16 @@ def compute_frame_angles(
         if "thumb_extension" in finger_data:
             angles[f"{side}_thumb_extension"] = finger_data["thumb_extension"]
 
+    # --- 3D angles from WHAM (SMPL 24 joints) ---
+    if joints_3d is not None:
+        try:
+            j3d = np.asarray(joints_3d, dtype=np.float64)
+            if j3d.shape == (24, 3):
+                angles_3d = _compute_3d_angles(j3d)
+                angles.update(angles_3d)
+        except (ValueError, TypeError):
+            pass  # Silently skip if joints_3d is malformed
+
     return angles
 
 
@@ -301,6 +371,8 @@ def summarize_pose_statistics(frames_data: list[dict]) -> dict:
 
     Args:
         frames_data: List of frame dicts with "dancer_pose" keys.
+            Each frame may optionally include a "joints_3d" key with
+            a (24, 3) array of SMPL joint positions from WHAM.
 
     Returns:
         Dict of aggregate statistics suitable for the LLM prompt.
@@ -327,6 +399,18 @@ def summarize_pose_statistics(frames_data: list[dict]) -> dict:
     shoulder_elev_avg = []
     neck_tilt_abs = []
 
+    # 3D angle accumulators
+    knee_angle_3d = []
+    left_knee_angle_3d = []
+    right_knee_angle_3d = []
+    torso_angle_3d = []
+    arm_ext_left_3d = []
+    arm_ext_right_3d = []
+    hip_abd_left = []
+    hip_abd_right = []
+    hip_sym_3d = []
+    torso_twist = []
+
     for frame in frames_data:
         pose = frame.get("dancer_pose", {})
         if not pose:
@@ -337,6 +421,7 @@ def summarize_pose_statistics(frames_data: list[dict]) -> dict:
             face=frame.get("face"),
             left_hand=frame.get("left_hand"),
             right_hand=frame.get("right_hand"),
+            joints_3d=frame.get("joints_3d"),
         )
 
         if "avg_knee_angle" in angles:
@@ -381,6 +466,28 @@ def summarize_pose_statistics(frames_data: list[dict]) -> dict:
             shoulder_elev_avg.append(angles["shoulder_elevation_avg"])
         if "neck_lateral_tilt_abs" in angles:
             neck_tilt_abs.append(angles["neck_lateral_tilt_abs"])
+
+        # Collect 3D angles (present only when joints_3d was provided)
+        if "knee_angle_3d" in angles:
+            knee_angle_3d.append(angles["knee_angle_3d"])
+        if "left_knee_angle_3d" in angles:
+            left_knee_angle_3d.append(angles["left_knee_angle_3d"])
+        if "right_knee_angle_3d" in angles:
+            right_knee_angle_3d.append(angles["right_knee_angle_3d"])
+        if "torso_angle_3d" in angles:
+            torso_angle_3d.append(angles["torso_angle_3d"])
+        if "arm_extension_left_3d" in angles:
+            arm_ext_left_3d.append(angles["arm_extension_left_3d"])
+        if "arm_extension_right_3d" in angles:
+            arm_ext_right_3d.append(angles["arm_extension_right_3d"])
+        if "hip_abduction_left" in angles:
+            hip_abd_left.append(angles["hip_abduction_left"])
+        if "hip_abduction_right" in angles:
+            hip_abd_right.append(angles["hip_abduction_right"])
+        if "hip_symmetry_3d" in angles:
+            hip_sym_3d.append(angles["hip_symmetry_3d"])
+        if "torso_twist" in angles:
+            torso_twist.append(angles["torso_twist"])
 
     summary = {}
 
@@ -457,6 +564,43 @@ def summarize_pose_statistics(frames_data: list[dict]) -> dict:
     if neck_tilt_abs:
         summary["avg_neck_lateral_tilt"] = sum(neck_tilt_abs) / len(neck_tilt_abs)
         summary["max_neck_lateral_tilt"] = max(neck_tilt_abs)
+
+    # --- 3D angle summaries (from WHAM, when available) ---
+    def _mean(lst):
+        return sum(lst) / len(lst) if lst else None
+
+    def _std(lst):
+        if len(lst) < 2:
+            return None
+        m = sum(lst) / len(lst)
+        return math.sqrt(sum((v - m) ** 2 for v in lst) / len(lst))
+
+    if knee_angle_3d:
+        summary["avg_knee_angle_3d"] = _mean(knee_angle_3d)
+        summary["knee_angle_3d_std"] = _std(knee_angle_3d)
+        summary["min_knee_angle_3d"] = min(knee_angle_3d)
+        summary["max_knee_angle_3d"] = max(knee_angle_3d)
+    if left_knee_angle_3d:
+        summary["avg_left_knee_angle_3d"] = _mean(left_knee_angle_3d)
+    if right_knee_angle_3d:
+        summary["avg_right_knee_angle_3d"] = _mean(right_knee_angle_3d)
+    if torso_angle_3d:
+        summary["avg_torso_angle_3d"] = _mean(torso_angle_3d)
+        summary["torso_angle_3d_std"] = _std(torso_angle_3d)
+    if arm_ext_left_3d:
+        summary["avg_arm_extension_left_3d"] = _mean(arm_ext_left_3d)
+    if arm_ext_right_3d:
+        summary["avg_arm_extension_right_3d"] = _mean(arm_ext_right_3d)
+    if hip_abd_left:
+        summary["avg_hip_abduction_left"] = _mean(hip_abd_left)
+    if hip_abd_right:
+        summary["avg_hip_abduction_right"] = _mean(hip_abd_right)
+    if hip_sym_3d:
+        summary["avg_hip_symmetry_3d"] = _mean(hip_sym_3d)
+    if torso_twist:
+        summary["avg_torso_twist"] = _mean(torso_twist)
+        summary["torso_twist_std"] = _std(torso_twist)
+        summary["max_torso_twist"] = max(torso_twist)
 
     # Composite balance score (0-1)
     balance_components = []
