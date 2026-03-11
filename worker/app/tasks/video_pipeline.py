@@ -12,7 +12,7 @@ from app.pipeline.angles import summarize_pose_statistics, compute_frame_angles
 from app.pipeline.llm import generate_coaching_feedback
 from app.pipeline.scoring import compute_scores
 from app.pipeline.beat_detection import run_beat_analysis, detect_foot_strikes, score_rhythm_sync
-from app.pipeline.wham import is_wham_available, run_wham_estimation, merge_wham_with_rtmpose
+from app.pipeline.wham import dispatch_wham_3d
 
 logger = logging.getLogger(__name__)
 
@@ -282,20 +282,6 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                 is_cancelled=is_cancelled, seed_bboxes=seed_bboxes,
             )
 
-            # Stage 2b: WHAM 3D estimation for multi-dancer (optional, non-fatal)
-            if is_wham_available():
-                _update_progress(performance_id, "wham_3d", 78.0)
-                try:
-                    wham_frames = run_wham_estimation(video_path, metadata, is_cancelled=is_cancelled)
-                    # Merge WHAM data into each dancer's frames
-                    for track_id in per_dancer_frames:
-                        per_dancer_frames[track_id] = merge_wham_with_rtmpose(
-                            per_dancer_frames[track_id], wham_frames
-                        )
-                    logger.info("WHAM: Merged 3D data into multi-dancer frames")
-                except Exception as e:
-                    logger.warning(f"WHAM 3D estimation failed (non-fatal): {e}")
-
             # Store frames per dancer
             _update_progress(performance_id, "pose_analysis", 80.0)
             total_stored = 0
@@ -326,22 +312,16 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
             _update_progress(performance_id, "pose_estimation", 20.0, frame=0, total_frames=total_frames)
             frames_data = run_pose_estimation(video_path, metadata, progress_callback=pose_progress, is_cancelled=is_cancelled)
 
-            # Stage 2b: WHAM 3D estimation (optional, non-fatal)
-            if is_wham_available():
-                _update_progress(performance_id, "wham_3d", 80.0)
-                try:
-                    wham_frames = run_wham_estimation(video_path, metadata, is_cancelled=is_cancelled)
-                    frames_data = merge_wham_with_rtmpose(frames_data, wham_frames)
-                    logger.info(f"WHAM: Merged 3D data into {len(frames_data)} frames")
-                except Exception as e:
-                    logger.warning(f"WHAM 3D estimation failed (non-fatal): {e}")
-
             with get_session() as session:
                 _store_frames_and_metrics(session, performance_id, None, frames_data)
 
             _update_progress(performance_id, "pose_analysis", 83.0)
             _update_progress(performance_id, "llm_synthesis", 85.0)
             _analyze_dancer(performance_id, None, None, frames_data, metadata, beat_data=beat_data)
+
+        # Dispatch WHAM 3D estimation (fire-and-forget, runs in separate container)
+        video_info = {"width": metadata.get("width", 1920), "height": metadata.get("height", 1080), "fps": metadata.get("fps", 30)}
+        dispatch_wham_3d(performance_id, video_path, video_info)
 
         # Complete
         _update_progress(performance_id, "scoring", 95.0)

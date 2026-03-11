@@ -57,6 +57,25 @@ services:
     security_opt:
       - label=disable
 
+  wham_worker:
+    build: ./wham_worker
+    volumes:
+      - ./wham_worker/app:/app/app:z
+      - uploads:/app/uploads
+      - ${HOME}/bharatanatyam-data/smpl/checkpoints:/opt/wham/checkpoints:z
+      - ${HOME}/bharatanatyam-data/smpl/dataset/body_models:/opt/wham/dataset/body_models:z
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    devices:
+      - nvidia.com/gpu=all
+    networks:
+      - bharatanatyam
+    security_opt:
+      - label=disable
+
   postgres:
     image: postgres:16-alpine
     environment:

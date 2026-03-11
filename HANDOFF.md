@@ -62,14 +62,16 @@ All metrics stored in `JointAngleState.all_angles` JSON per frame.
 - Beat data stored on Performance: `beat_timestamps` (JSON), `tempo_bpm` (float)
 - Frontend: beat markers bar in DanceTimeline, rhythm score card in ScoreCards
 
-## WHAM 3D Integration (Phase 1)
-- `worker/app/pipeline/wham.py` — wrapper with lazy loading, graceful fallback
-- Runs in local-only mode (no SLAM/DPVO) — produces 3D joints + foot contact
-- Pipeline: RTMPose → WHAM → merge by timestamp → store enriched frames
+## WHAM 3D Integration (Separate Container)
+- **Architecture**: Separate `wham_worker` container (PyTorch 1.13.1 + CUDA 11.6) communicates via Celery
+- **Main worker** (`worker/app/pipeline/wham.py`): thin dispatch client, sends fire-and-forget tasks to `wham_3d` queue
+- **WHAM worker** (`wham_worker/`): receives tasks, reads 2D poses from Postgres, runs WHAM 3D, writes `joints_3d`/`world_position`/`foot_contact` back to frame rows
+- **Staged GPU loading**: HMR2a feature extractor (~2.9GB) → extract → release → WHAM network (~0.2GB) → infer → release (fits 12GB VRAM)
+- **Bypasses ViTPose**: Feeds RTMPose 2D keypoints directly via `_poses_to_tracking_results()`, uses HMR2 only for image features
+- **Fire-and-forget**: Main pipeline completes with 2D scores immediately; WHAM enriches frames asynchronously
 - Scoring prefers 3D values with `or` fallback to 2D
 - `technique_scores.inputs.source_3d` flag indicates 3D data was used
-- **Not yet active**: needs WHAM repo clone, ViTPose port to HuggingFace, SMPL model files
-- Env vars: `WHAM_ROOT`, `SMPL_MODEL_PATH`, `WHAM_CHECKPOINT`
+- **Model files**: `$HOME/bharatanatyam-data/smpl/checkpoints/` (wham_vit_bedlam_w_3dpw.pth.tar, hmr2a.ckpt) and `$HOME/bharatanatyam-data/smpl/dataset/body_models/` (SMPL_NEUTRAL.pkl)
 
 ## Score System (all 0-100)
 | Score | Weight | What It Measures |
@@ -165,9 +167,17 @@ bharatanatyam-analyzer/
 │   │   │   ├── tracker.py          # IoU + centroid + positional tracker
 │   │   │   ├── llm.py              # Claude API coaching
 │   │   │   ├── beat_detection.py   # Audio onset detection + rhythm scoring
-│   │   │   └── wham.py             # WHAM 3D pose wrapper (optional)
+│   │   │   └── wham.py             # WHAM 3D dispatch client (fire-and-forget)
 │   │   └── models/
 │   └── requirements.txt
+├── wham_worker/                     # Separate WHAM 3D container (PyTorch 1.13.1)
+│   ├── Dockerfile
+│   └── app/
+│       ├── celery_app.py            # Celery on wham_3d queue
+│       ├── db.py                    # Postgres session
+│       ├── models.py                # Minimal Frame/Performance models
+│       ├── inference.py             # WHAM inference (staged GPU loading)
+│       └── tasks.py                 # run_wham_3d task
 └── frontend/
     └── src/
         ├── App.tsx
@@ -194,8 +204,9 @@ bharatanatyam-analyzer/
 | Movement timeline + synchronicity | Done |
 | Extended pose metrics (head/wrist/fingers/shoulders/neck) | Done |
 | Audio/beat detection + rhythm scoring | Done |
-| WHAM 3D integration (Phase 1 — code + data model) | Done (models not installed) |
-| WHAM 3D activation (Phase 2 — port ViTPose, install models) | Not started |
+| WHAM 3D integration (data model + angles + scoring) | Done |
+| WHAM 3D worker container (separate PyTorch 1.13.1 container) | Done |
+| WHAM 3D end-to-end test | Not yet tested |
 | WHAM foot contact rhythm (Phase 2b) | Not started |
 | WHAM global trajectory / stage coverage (Phase 3) | Not started |
 | Mudra classification | Not started (table + finger data ready) |
