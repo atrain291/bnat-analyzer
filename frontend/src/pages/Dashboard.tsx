@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, UserPlus, Music, PlayCircle, Clock, CheckCircle2, Loader2, AlertCircle } from "lucide-react";
+import { Upload, UserPlus, Music, PlayCircle, Clock, CheckCircle2, Loader2, AlertCircle, Camera } from "lucide-react";
 import { listDancers, createDancer, Dancer } from "../api/dancers";
 import { uploadVideo, listPerformances, PerformanceListItem } from "../api/performances";
+import { listMultiAngleGroups, MultiAngleGroupListItem } from "../api/multiAngle";
 
 const ITEM_TYPES = [
   "Alarippu",
@@ -36,10 +37,12 @@ export default function Dashboard() {
   const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
   const [performances, setPerformances] = useState<PerformanceListItem[]>([]);
+  const [multiAngleGroups, setMultiAngleGroups] = useState<MultiAngleGroupListItem[]>([]);
 
   useEffect(() => {
     listDancers().then(setDancers).catch(() => {});
     listPerformances().then(setPerformances).catch(() => {});
+    listMultiAngleGroups().then(setMultiAngleGroups).catch(() => {});
   }, []);
 
   const handleCreateDancer = async () => {
@@ -158,6 +161,57 @@ export default function Dashboard() {
                     )}
                     {p.status !== "complete" && p.status !== "failed" && (
                       <span className="text-xs text-gray-400 capitalize">{p.status.replace("_", " ")}</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Multi-Angle Groups */}
+      {multiAngleGroups.length > 0 && (
+        <section className="rounded-lg bg-gray-800 p-6 space-y-4">
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+            <Camera size={20} /> Multi-Angle Analyses
+          </h2>
+          <div className="space-y-2">
+            {multiAngleGroups.map((g) => {
+              const statusIcon =
+                g.status === "complete" ? <CheckCircle2 size={16} className="text-green-400" /> :
+                g.status === "failed" ? <AlertCircle size={16} className="text-red-400" /> :
+                g.status === "processing" || g.status === "detecting" ? <Loader2 size={16} className="text-brand-400 animate-spin" /> :
+                <Clock size={16} className="text-gray-400" />;
+
+              const href =
+                g.status === "complete" ? `/multi-angle/review/${g.id}` :
+                g.status === "failed" ? null :
+                `/multi-angle/processing/${g.id}`;
+
+              return (
+                <div
+                  key={g.id}
+                  className={`flex items-center justify-between rounded-lg bg-gray-700/50 px-4 py-3 ${href ? "cursor-pointer hover:bg-gray-700" : ""}`}
+                  onClick={() => href && navigate(href)}
+                >
+                  <div className="flex items-center gap-3">
+                    {statusIcon}
+                    <div>
+                      <div className="text-white font-medium">
+                        {g.item_name || "Multi-Angle"} <span className="text-gray-400 font-normal">({g.performance_count} angles)</span>
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        {new Date(g.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {g.status === "complete" && g.overall_score !== null && (
+                      <div className="text-right">
+                        <div className="text-lg font-bold text-brand-400">{g.overall_score}</div>
+                        <div className="text-xs text-gray-500">/ 100</div>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -343,13 +397,22 @@ export default function Dashboard() {
           </div>
         )}
 
-        <button
-          className="w-full rounded-lg bg-brand-600 py-3 text-lg font-semibold text-white hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          disabled={!file || !selectedDancer || uploading}
-          onClick={handleUpload}
-        >
-          {uploading ? "Uploading..." : "Analyze Performance"}
-        </button>
+        <div className="flex gap-3">
+          <button
+            className="flex-1 rounded-lg bg-brand-600 py-3 text-lg font-semibold text-white hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            disabled={!file || !selectedDancer || uploading}
+            onClick={handleUpload}
+          >
+            {uploading ? "Uploading..." : "Analyze Performance"}
+          </button>
+          <button
+            className="rounded-lg bg-gray-700 py-3 px-6 text-sm font-medium text-gray-300 hover:bg-gray-600 hover:text-white transition-colors flex items-center gap-2"
+            onClick={() => navigate("/multi-angle/upload")}
+          >
+            <Camera size={18} />
+            Multi-Angle
+          </button>
+        </div>
       </section>
     </div>
   );

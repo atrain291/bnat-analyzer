@@ -37,3 +37,12 @@ def dispatch_pipeline(performance_id: int, video_path: str, selected_tracks: lis
         queue="video_pipeline",
     )
     return result.id
+
+
+def dispatch_multi_angle_pipeline(group_id: int) -> str:
+    result = celery_app.send_task(
+        "worker.app.tasks.multi_angle_pipeline.run_multi_angle_pipeline",
+        args=[group_id],
+        queue="video_pipeline",
+    )
+    return result.id

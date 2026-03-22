@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.api.routes import dancers, performances, upload
+from app.api.routes import dancers, performances, upload, multi_angle
 
 app = FastAPI(title="Bharatanatyam Dance Analyzer", version="0.1.0")
 
@@ -18,6 +18,7 @@ app.add_middleware(
 app.include_router(dancers.router)
 app.include_router(performances.router)
 app.include_router(upload.router)
+app.include_router(multi_angle.router)
 
 app.mount("/uploads", StaticFiles(directory="/app/uploads"), name="uploads")
 

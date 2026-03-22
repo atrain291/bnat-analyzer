@@ -127,3 +127,30 @@ class Analysis(Base):
 
     performance: Mapped["Performance"] = relationship(back_populates="analysis")  # noqa: F821
     performance_dancer: Mapped["PerformanceDancer | None"] = relationship(back_populates="analysis")  # noqa: F821
+
+
+class MultiAngleAnalysis(Base):
+    """Fused analysis combining results from multiple camera angles for a dancer."""
+    __tablename__ = "multi_angle_analyses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    multi_angle_group_id: Mapped[int] = mapped_column(ForeignKey("multi_angle_groups.id", ondelete="CASCADE"))
+    dancer_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    # Fused scores (0-100) — consensus across views
+    aramandi_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    upper_body_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    symmetry_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rhythm_consistency_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    overall_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Per-view score breakdown: {performance_id: {score_name: value}}
+    per_view_scores: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Which view was trusted more per metric: {metric: performance_id}
+    score_sources: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Multi-angle coaching from LLM
+    llm_summary: Mapped[str | None] = mapped_column(String(8000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    multi_angle_group: Mapped["MultiAngleGroup"] = relationship(back_populates="multi_angle_analyses")  # noqa: F821

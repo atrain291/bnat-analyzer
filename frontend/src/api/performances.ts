@@ -82,6 +82,8 @@ export interface Performance {
   beat_timestamps: number[] | null;
   tempo_bpm: number | null;
   detection_frame_url: string | null;
+  multi_angle_group_id: number | null;
+  camera_label: string | null;
   analysis: AnalysisData[];
   detected_persons: DetectedPerson[];
   performance_dancers: PerformanceDancer[];

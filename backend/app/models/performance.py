@@ -6,6 +6,33 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 
+class MultiAngleGroup(Base):
+    """Groups multiple performances (videos) of the same dance from different camera angles."""
+    __tablename__ = "multi_angle_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    dancer_id: Mapped[int] = mapped_column(ForeignKey("dancers.id"))
+
+    # Dance metadata (shared across all angles)
+    item_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    item_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    talam: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ragam: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # Audio sync offset (ms) between videos, computed by cross-correlation
+    sync_offsets: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {performance_id: offset_ms}
+    sync_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Fused analysis
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, processing, complete, failed
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    dancer: Mapped["Dancer"] = relationship()  # noqa: F821
+    performances: Mapped[list["Performance"]] = relationship(back_populates="multi_angle_group")
+    multi_angle_analyses: Mapped[list["MultiAngleAnalysis"]] = relationship(back_populates="multi_angle_group", cascade="all, delete-orphan")  # noqa: F821
+
+
 class Session(Base):
     __tablename__ = "sessions"
 
@@ -26,6 +53,10 @@ class Performance(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[int | None] = mapped_column(ForeignKey("sessions.id"), nullable=True)
     dancer_id: Mapped[int] = mapped_column(ForeignKey("dancers.id"))
+
+    # Multi-angle grouping
+    multi_angle_group_id: Mapped[int | None] = mapped_column(ForeignKey("multi_angle_groups.id", ondelete="SET NULL"), nullable=True)
+    camera_label: Mapped[str | None] = mapped_column(String(100), nullable=True)  # e.g. "Front", "Side", "3/4 angle"
 
     # Dance metadata
     item_name: Mapped[str | None] = mapped_column(String(300), nullable=True)  # e.g. "Alarippu", "Jatiswaram"
@@ -55,6 +86,7 @@ class Performance(Base):
     # Relationships
     dancer: Mapped["Dancer"] = relationship(back_populates="performances")  # noqa: F821
     session: Mapped["Session | None"] = relationship(back_populates="performances")
+    multi_angle_group: Mapped["MultiAngleGroup | None"] = relationship(back_populates="performances")
     frames: Mapped[list["Frame"]] = relationship(back_populates="performance", cascade="all, delete-orphan")  # noqa: F821
     analysis: Mapped[list["Analysis"]] = relationship(back_populates="performance", cascade="all, delete-orphan")  # noqa: F821
     detected_persons: Mapped[list["DetectedPerson"]] = relationship(back_populates="performance", cascade="all, delete-orphan")

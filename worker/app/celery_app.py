@@ -7,7 +7,7 @@ app = Celery(
     "bharatanatyam_analyzer",
     broker=redis_url,
     backend=redis_url,
-    include=["app.tasks.video_pipeline", "app.tasks.detect_dancers"],
+    include=["app.tasks.video_pipeline", "app.tasks.detect_dancers", "app.tasks.multi_angle_pipeline"],
 )
 
 app.conf.update(

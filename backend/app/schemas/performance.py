@@ -75,6 +75,8 @@ class PerformanceResponse(BaseModel):
     beat_timestamps: list | None = None
     tempo_bpm: float | None = None
     detection_frame_url: str | None = None
+    multi_angle_group_id: int | None = None
+    camera_label: str | None = None
     created_at: datetime
     analysis: list[AnalysisResponse] = []
     detected_persons: list[DetectedPersonResponse] = []
@@ -125,3 +127,75 @@ class UploadResponse(BaseModel):
     performance_id: int
     task_id: str
     status: str
+
+
+# --- Multi-angle schemas ---
+
+class MultiAngleUploadRequest(BaseModel):
+    dancer_id: int
+    camera_labels: list[str]  # e.g. ["Front", "Side"]
+    item_name: str | None = None
+    item_type: str | None = None
+    talam: str | None = None
+    ragam: str | None = None
+
+
+class MultiAngleUploadResponse(BaseModel):
+    group_id: int
+    performances: list[UploadResponse]
+
+
+class MultiAngleAnalysisResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    dancer_label: str | None
+    aramandi_score: float | None
+    upper_body_score: float | None
+    symmetry_score: float | None
+    rhythm_consistency_score: float | None
+    overall_score: float | None
+    per_view_scores: dict | None
+    score_sources: dict | None
+    llm_summary: str | None
+    created_at: datetime
+
+
+class MultiAngleGroupResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    dancer_id: int
+    item_name: str | None
+    item_type: str | None
+    talam: str | None
+    ragam: str | None
+    sync_offsets: dict | None
+    sync_confidence: float | None
+    status: str
+    created_at: datetime
+    performances: list[PerformanceResponse] = []
+    multi_angle_analyses: list[MultiAngleAnalysisResponse] = []
+
+
+class MultiAngleGroupListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    dancer_id: int
+    item_name: str | None
+    status: str
+    created_at: datetime
+    performance_count: int = 0
+    overall_score: float | None = None
+
+
+class CrossViewDancerLink(BaseModel):
+    """Links a dancer label across performances in a multi-angle group."""
+    label: str
+    # Map of performance_id -> track_id for this dancer in each view
+    performance_tracks: dict[int, int]
+
+
+class CrossViewDancerLinkRequest(BaseModel):
+    links: list[CrossViewDancerLink]

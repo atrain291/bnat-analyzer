@@ -18,12 +18,29 @@ class Session(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
 
 
+class MultiAngleGroup(Base):
+    __tablename__ = "multi_angle_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    dancer_id: Mapped[int] = mapped_column(ForeignKey("dancers.id"))
+    item_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    item_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    talam: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ragam: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    sync_offsets: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    sync_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Performance(Base):
     __tablename__ = "performances"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[int | None] = mapped_column(ForeignKey("sessions.id"), nullable=True)
     dancer_id: Mapped[int] = mapped_column(ForeignKey("dancers.id"))
+    multi_angle_group_id: Mapped[int | None] = mapped_column(ForeignKey("multi_angle_groups.id"), nullable=True)
+    camera_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
     item_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     item_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     talam: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -135,4 +152,21 @@ class Analysis(Base):
     fatigue_markers: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     llm_summary: Mapped[str | None] = mapped_column(String(8000), nullable=True)
     practice_plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class MultiAngleAnalysis(Base):
+    __tablename__ = "multi_angle_analyses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    multi_angle_group_id: Mapped[int] = mapped_column(ForeignKey("multi_angle_groups.id"))
+    dancer_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    aramandi_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    upper_body_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    symmetry_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rhythm_consistency_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    overall_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    per_view_scores: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    score_sources: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    llm_summary: Mapped[str | None] = mapped_column(String(8000), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
