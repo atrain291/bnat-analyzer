@@ -4,6 +4,8 @@ Different camera angles provide better visibility for different metrics:
 - Front view: symmetry, arm extension, foot turnout
 - Side view: torso uprightness, aramandi depth, forward lean
 - 3/4 view: balanced visibility
+- Front-right / front-left: good symmetry visibility (like front) with partial
+  depth information (like 3/4), making them a useful pair for Bharatanatyam
 
 When camera labels are known, we weight scores by view reliability.
 Otherwise, we average across views.
@@ -37,6 +39,20 @@ VIEW_WEIGHTS = {
         "foot_technique_score": 0.7,
         "rhythm_consistency_score": 1.0,
     },
+    "front-right": {
+        "aramandi_score": 0.8,
+        "upper_body_score": 0.7,
+        "symmetry_score": 0.85,
+        "foot_technique_score": 0.75,
+        "rhythm_consistency_score": 1.0,
+    },
+    "front-left": {
+        "aramandi_score": 0.8,
+        "upper_body_score": 0.7,
+        "symmetry_score": 0.85,
+        "foot_technique_score": 0.75,
+        "rhythm_consistency_score": 1.0,
+    },
 }
 
 SCORE_FIELDS = [
@@ -53,6 +69,11 @@ def _normalize_camera_label(label: str | None) -> str:
     if not label:
         return "unknown"
     label_lower = label.lower().strip()
+    # Check specific compound labels before generic ones
+    if "front" in label_lower and "right" in label_lower:
+        return "front-right"
+    if "front" in label_lower and "left" in label_lower:
+        return "front-left"
     if "front" in label_lower:
         return "front"
     if "side" in label_lower:
