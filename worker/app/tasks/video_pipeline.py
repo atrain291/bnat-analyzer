@@ -9,6 +9,7 @@ from app.db import get_session
 from app.models.performance import Performance, PerformanceDancer, DetectedPerson, Frame, Analysis, JointAngleState, BalanceMetrics
 from app.pipeline.ingest import extract_metadata
 from app.pipeline.pose import run_pose_estimation, run_pose_estimation_multi
+from app.pipeline.pose_config import POSE_FRAME_SKIP
 from app.pipeline.angles import compute_frame_angles, OnlineAngleAccumulator
 from app.pipeline.llm import generate_coaching_feedback
 from app.pipeline.scoring import compute_scores
@@ -39,16 +40,18 @@ def _make_progress_updater(performance_id: int, status: str = "processing"):
     The returned function always pushes to Redis (cheap) but only writes
     to Postgres when the stage changes or PROGRESS_DB_INTERVAL has elapsed.
     """
-    state = {"last_stage": None, "last_db_time": 0.0}
+    state = {"last_stage": None, "last_message": None, "last_db_time": 0.0}
 
     def update(stage: str, pct: float, final_status: str | None = None, **extra):
         progress = {"stage": stage, "pct": round(pct, 1), **extra}
 
         now = time.monotonic()
         stage_changed = stage != state["last_stage"]
+        msg = extra.get("message")
+        message_changed = msg and msg != state["last_message"] and "frame" not in extra
         elapsed = now - state["last_db_time"]
 
-        if stage_changed or elapsed >= PROGRESS_DB_INTERVAL or final_status:
+        if stage_changed or message_changed or elapsed >= PROGRESS_DB_INTERVAL or final_status:
             with get_session() as session:
                 perf = session.query(Performance).filter(
                     Performance.id == performance_id
@@ -57,6 +60,7 @@ def _make_progress_updater(performance_id: int, status: str = "processing"):
                     perf.pipeline_progress = progress
                     perf.status = final_status or status
             state["last_stage"] = stage
+            state["last_message"] = extra.get("message")
             state["last_db_time"] = now
 
         current_task.update_state(state="PROGRESS", meta=progress)
@@ -268,8 +272,8 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
     update_progress = _make_progress_updater(performance_id, status="processing")
 
     try:
-        # Stage 1: Ingest
-        update_progress("ingest", 5.0)
+        # Stage 1: Ingest (metadata only — transcode already done in detection phase)
+        update_progress("ingest", 7.0, message="Video ready")
         metadata = extract_metadata(video_path)
 
         with get_session() as session:
@@ -281,7 +285,7 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
         is_cancelled = _make_cancel_checker(performance_id)
 
         # Stage 1b: Audio beat detection (fast, CPU-only, runs before pose estimation)
-        update_progress("beat_detection", 10.0)
+        update_progress("beat_detection", 10.0, message="Analyzing audio for beat onsets...")
         beat_data = None
         try:
             beat_data = run_beat_analysis(video_path, metadata)
@@ -315,9 +319,12 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
 
             def pose_progress(current_frame: int, total: int):
                 pct = 20.0 + (current_frame / max(total, 1)) * 60.0
-                update_progress("pose_estimation", pct, frame=current_frame, total_frames=total)
+                update_progress("pose_estimation", pct, frame=current_frame, total_frames=total,
+                                message=f"Estimating poses... frame {current_frame}/{total}")
 
-            update_progress("pose_estimation", 20.0, frame=0, total_frames=total_frames)
+            effective_total = total_frames // POSE_FRAME_SKIP
+            update_progress("pose_estimation", 20.0, frame=0, total_frames=effective_total,
+                            message="Loading pose model...")
 
             # Stream (track_id, frame_dict) tuples from the generator, routing
             # each frame to its dancer's per-dancer list for batch DB storage.
@@ -331,7 +338,7 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                 per_dancer_frames[tid].append(fd)
 
             # Store frames + compute stats per dancer (single pass each, no recomputation)
-            update_progress("pose_analysis", 80.0)
+            update_progress("pose_analysis", 80.0, message="Computing joint angles and storing frames...")
             dancer_results: dict[int, tuple[int, dict, OnlineAngleAccumulator]] = {}
             for track_id, frames_data in per_dancer_frames.items():
                 info = track_id_to_info[track_id]
@@ -350,7 +357,9 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                 info = track_id_to_info[track_id]
                 frame_count, pose_summary, accumulator = dancer_results[track_id]
                 pct = 83.0 + (i / max(num_dancers, 1)) * 12.0
-                update_progress("llm_synthesis", pct)
+                dancer_label = info.get("label") or f"Dancer {i + 1}"
+                update_progress("llm_synthesis", pct,
+                                message=f"Generating coaching for {dancer_label}... ({i + 1}/{num_dancers})")
                 if frame_count:
                     _analyze_dancer(
                         performance_id, info["performance_dancer_id"],
@@ -362,17 +371,20 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
             # Single-dancer mode — stream directly from generator through storage
             def pose_progress(current_frame: int, total: int):
                 pct = 20.0 + (current_frame / max(total, 1)) * 63.0
-                update_progress("pose_estimation", pct, frame=current_frame, total_frames=total)
+                update_progress("pose_estimation", pct, frame=current_frame, total_frames=total,
+                                message=f"Estimating poses... frame {current_frame}/{total}")
 
-            update_progress("pose_estimation", 20.0, frame=0, total_frames=total_frames)
+            effective_total = total_frames // POSE_FRAME_SKIP
+            update_progress("pose_estimation", 20.0, frame=0, total_frames=effective_total,
+                            message="Loading pose model...")
             frame_gen = run_pose_estimation(video_path, metadata, progress_callback=pose_progress, is_cancelled=is_cancelled)
 
             with get_session() as session:
                 frame_count, accumulator = _store_frames_and_metrics(session, performance_id, None, frame_gen)
             pose_summary = accumulator.summarize()
 
-            update_progress("pose_analysis", 83.0)
-            update_progress("llm_synthesis", 85.0)
+            update_progress("pose_analysis", 83.0, message="Computing joint angles...")
+            update_progress("llm_synthesis", 85.0, message="Generating coaching feedback...")
             _analyze_dancer(
                 performance_id, None, None, frame_count, pose_summary, metadata,
                 beat_data=beat_data, accumulator=accumulator,
@@ -383,8 +395,8 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
         dispatch_wham_3d(performance_id, video_path, video_info)
 
         # Complete
-        update_progress("scoring", 95.0)
-        update_progress("complete", 100.0, final_status="complete")
+        update_progress("scoring", 95.0, message="Computing final scores...")
+        update_progress("complete", 100.0, final_status="complete", message="Analysis complete!")
 
         logger.info(f"Pipeline complete for performance {performance_id}")
         return {"status": "complete"}

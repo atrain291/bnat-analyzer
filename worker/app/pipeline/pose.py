@@ -5,6 +5,8 @@ from typing import Callable
 import numpy as np
 from rtmlib import Wholebody
 
+from app.pipeline.pose_config import POSE_FRAME_SKIP, POSE_MAX_HEIGHT, POSE_USE_TENSORRT
+
 logger = logging.getLogger(__name__)
 
 # COCO-WholeBody 133 keypoints
@@ -50,26 +52,54 @@ NVDEC_CODECS = {
 }
 
 
-def _build_ffmpeg_cmd(video_path: str, codec: str, width: int, height: int) -> list[str]:
-    """Build ffmpeg command for frame extraction, with optional NVDEC acceleration."""
+def _build_ffmpeg_cmd(
+    video_path: str, codec: str, width: int, height: int,
+    frame_skip: int = 1, max_height: int = 0,
+) -> tuple[list[str], int, int, int]:
+    """Build ffmpeg command for frame extraction, with optional NVDEC acceleration.
+
+    Returns (cmd, output_width, output_height, effective_total_frames_divisor).
+    The caller must divide total_frames by the divisor for accurate progress.
+    """
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
 
     nvdec = NVDEC_CODECS.get(codec)
     if nvdec:
         cmd += ["-hwaccel", "cuda", "-c:v", nvdec]
 
+    cmd += ["-i", video_path]
+
+    # Build video filters for frame skipping and resolution downscaling
+    vf_parts = []
+
+    if frame_skip > 1:
+        vf_parts.append(f"select='not(mod(n\\,{frame_skip}))'")
+        vf_parts.append("setpts=N/FRAME_RATE/TB")
+
+    out_w, out_h = width, height
+    if max_height > 0 and height > max_height:
+        out_w = int(width * max_height / height)
+        out_w = out_w + (out_w % 2)  # ensure even width
+        out_h = max_height + (max_height % 2)  # ensure even height
+        vf_parts.append(f"scale={out_w}:{out_h}")
+
+    if vf_parts:
+        cmd += ["-vf", ",".join(vf_parts)]
+
     cmd += [
-        "-i", video_path,
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
         "-v", "error",
         "pipe:1",
     ]
-    return cmd, width, height
+    return cmd, out_w, out_h, frame_skip
 
 
 def _init_model(device: str = "cuda") -> Wholebody:
     """Initialize RTMPose WholeBody model."""
+    if POSE_USE_TENSORRT:
+        from app.pipeline.tensorrt_setup import enable_tensorrt
+        enable_tensorrt()
     return Wholebody(
         to_openpose=False,
         mode="performance",
@@ -269,10 +299,16 @@ def run_pose_estimation(
     codec = metadata.get("codec", "h264")
     total_frames = metadata["total_frames"]
 
-    cmd, w, h = _build_ffmpeg_cmd(video_path, codec, width, height)
+    frame_skip = POSE_FRAME_SKIP
+    max_height = POSE_MAX_HEIGHT
+    cmd, w, h, skip = _build_ffmpeg_cmd(video_path, codec, width, height,
+                                         frame_skip=frame_skip, max_height=max_height)
     frame_size = w * h * 3
+    effective_total = total_frames // skip
 
-    logger.info(f"Starting pose estimation (RTMPose WholeBody 133-pt): {total_frames} frames at {fps:.1f} fps")
+    logger.info(f"Starting pose estimation (RTMPose WholeBody 133-pt): "
+                f"{total_frames} frames at {fps:.1f} fps "
+                f"(skip={skip}, scale={w}x{h}, effective={effective_total})")
 
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     frame_idx = 0
@@ -286,7 +322,7 @@ def run_pose_estimation(
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
             keypoints, scores = model(frame)
 
-            timestamp_ms = int((frame_idx / fps) * 1000)
+            timestamp_ms = int((frame_idx * skip / fps) * 1000)
 
             pose_data = _extract_pose_data(keypoints, scores, w, h)
             pose_data["timestamp_ms"] = timestamp_ms
@@ -294,16 +330,16 @@ def run_pose_estimation(
 
             frame_idx += 1
             if progress_callback and frame_idx % 10 == 0:
-                progress_callback(frame_idx, total_frames)
+                progress_callback(frame_idx, effective_total)
             if is_cancelled and frame_idx % 10 == 0 and is_cancelled():
-                logger.info(f"Pose estimation cancelled at frame {frame_idx}/{total_frames}")
+                logger.info(f"Pose estimation cancelled at frame {frame_idx}/{effective_total}")
                 break
 
     finally:
         process.stdout.close()
         process.wait()
 
-    logger.info(f"Pose estimation complete: {frame_idx} frames processed")
+    logger.info(f"Pose estimation complete: {frame_idx} frames processed (of {effective_total} effective)")
 
 
 def run_detection_pass(
@@ -327,7 +363,7 @@ def run_detection_pass(
     codec = metadata.get("codec", "h264")
     total_frames = min(max_frames, metadata["total_frames"])
 
-    cmd, w, h = _build_ffmpeg_cmd(video_path, codec, width, height)
+    cmd, w, h, _ = _build_ffmpeg_cmd(video_path, codec, width, height)
     frame_size = w * h * 3
 
     logger.info(f"Detection pass: scanning first {total_frames} frames for persons")
@@ -393,11 +429,6 @@ def run_pose_estimation_multi(
     from app.pipeline.appearance import extract_appearance
 
     model = _init_model()
-    tracker = SimpleTracker()
-
-    # Seed tracker with known positions, appearance, and group membership
-    if seed_bboxes:
-        tracker.seed(seed_bboxes, histograms=seed_histograms, group_ids=selected_track_ids)
 
     fps = metadata["fps"]
     width = metadata["width"]
@@ -405,10 +436,22 @@ def run_pose_estimation_multi(
     codec = metadata.get("codec", "h264")
     total_frames = metadata["total_frames"]
 
-    cmd, w, h = _build_ffmpeg_cmd(video_path, codec, width, height)
-    frame_size = w * h * 3
+    effective_fps = fps / POSE_FRAME_SKIP
+    tracker = SimpleTracker(effective_fps=effective_fps)
 
-    logger.info(f"Multi-person pose estimation: tracking {len(selected_track_ids)} persons across {total_frames} frames")
+    # Seed tracker with known positions, appearance, and group membership
+    if seed_bboxes:
+        tracker.seed(seed_bboxes, histograms=seed_histograms, group_ids=selected_track_ids)
+
+    frame_skip = POSE_FRAME_SKIP
+    max_height = POSE_MAX_HEIGHT
+    cmd, w, h, skip = _build_ffmpeg_cmd(video_path, codec, width, height,
+                                         frame_skip=frame_skip, max_height=max_height)
+    frame_size = w * h * 3
+    effective_total = total_frames // skip
+
+    logger.info(f"Multi-person pose estimation: tracking {len(selected_track_ids)} persons "
+                f"across {total_frames} frames (skip={skip}, scale={w}x{h}, effective={effective_total})")
 
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     frame_counts: dict[int, int] = {tid: 0 for tid in selected_track_ids}
@@ -423,13 +466,13 @@ def run_pose_estimation_multi(
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
             keypoints, scores = model(frame)
 
-            timestamp_ms = int((frame_idx / fps) * 1000)
+            timestamp_ms = int((frame_idx * skip / fps) * 1000)
             persons = _extract_all_poses(keypoints, scores, w, h)
 
             if persons:
                 bboxes = [p["bbox"] for p in persons]
 
-                # Extract appearance every 5th frame (balance speed vs accuracy)
+                # Extract appearance every 5th output frame (balance speed vs accuracy)
                 hists = None
                 if frame_idx % 5 == 0:
                     hists = []
@@ -451,9 +494,9 @@ def run_pose_estimation_multi(
 
             frame_idx += 1
             if progress_callback and frame_idx % 10 == 0:
-                progress_callback(frame_idx, total_frames)
+                progress_callback(frame_idx, effective_total)
             if is_cancelled and frame_idx % 10 == 0 and is_cancelled():
-                logger.info(f"Multi-person pose estimation cancelled at frame {frame_idx}/{total_frames}")
+                logger.info(f"Multi-person pose estimation cancelled at frame {frame_idx}/{effective_total}")
                 break
 
     finally:

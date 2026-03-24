@@ -69,21 +69,25 @@ class SimpleTracker:
 
     def __init__(
         self,
-        iou_threshold: float = 0.2,
+        iou_threshold: float = 0.1,
         max_centroid_dist: float = 0.3,
         max_missing: int = 90,
         max_size_ratio: float = 2.5,
         graveyard_frames: int = 300,
         appearance_weight: float = 0.3,
         velocity_smoothing: float = 0.3,
+        effective_fps: float = 30.0,
     ):
+        # Scale frame-based thresholds by FPS to maintain consistent time durations
+        fps_scale = effective_fps / 30.0
         self.iou_threshold = iou_threshold
         self.max_centroid_dist = max_centroid_dist
-        self.max_missing = max_missing
+        self.max_missing = int(max_missing * fps_scale)
         self.max_size_ratio = max_size_ratio
-        self.graveyard_frames = graveyard_frames
+        self.graveyard_frames = int(graveyard_frames * fps_scale)
         self.appearance_weight = appearance_weight
         self.velocity_smoothing = velocity_smoothing
+        self.effective_fps = effective_fps
         self.next_id = 0
         self.active_tracks: dict[int, tuple] = {}  # track_id -> last bbox
         self.missing_count: dict[int, int] = {}  # track_id -> frames since last seen
@@ -102,6 +106,9 @@ class SimpleTracker:
         self.group_ids: set[int] = set()
         # Smoothed relative distances between group members (pair -> distance)
         self.group_distances: dict[tuple[int, int], float] = {}
+        # Re-lock candidates: graveyard_tid -> {bbox, count, frame_idx}
+        self.relock_candidates: dict[int, dict] = {}
+        self._frame_counter = 0
 
     def seed(self, known_bboxes: dict[int, tuple], histograms: dict[int, list[float]] | None = None,
              group_ids: set[int] | None = None):
@@ -401,6 +408,77 @@ class SimpleTracker:
             else:
                 still_unmatched.append(det_idx)
 
+        # Appearance-only re-lock: for group members in the graveyard that weren't
+        # recovered by position, try matching purely on appearance + size with
+        # 3-frame confirmation (inspired by fencing analyzer's re-lock pattern).
+        relock_recovered = []
+        unrecovered_group_graves = [
+            g_tid for g_tid in self.graveyard
+            if g_tid in self.group_ids and g_tid not in {assignments[i] for i in range(len(assignments)) if assignments[i] is not None}
+        ]
+        if still_unmatched and unrecovered_group_graves:
+            for det_idx in still_unmatched:
+                if not hists[det_idx]:
+                    continue
+                det_area = _bbox_area(bboxes[det_idx])
+                best_g_tid = None
+                best_app = -1
+                for g_tid in unrecovered_group_graves:
+                    if not self._size_compatible(bboxes[det_idx], g_tid):
+                        # Check against graveyard area directly
+                        g_avg = self.graveyard_area.get(g_tid, 0)
+                        if g_avg <= 0 or det_area <= 0:
+                            continue
+                        ratio = det_area / g_avg if det_area >= g_avg else g_avg / det_area
+                        if ratio > self.max_size_ratio:
+                            continue
+                    g_hist = self.graveyard_histogram.get(g_tid)
+                    if not g_hist or not hists[det_idx] or len(g_hist) != len(hists[det_idx]):
+                        continue
+                    app = float(sum(min(a, b) for a, b in zip(hists[det_idx], g_hist)))
+                    if app > best_app:
+                        best_app = app
+                        best_g_tid = g_tid
+
+                if best_g_tid is not None and best_app > 0.6:
+                    candidate = self.relock_candidates.get(best_g_tid)
+                    det_cx = (bboxes[det_idx][0] + bboxes[det_idx][2]) / 2
+                    det_cy = (bboxes[det_idx][1] + bboxes[det_idx][3]) / 2
+                    if candidate and self._frame_counter - candidate["frame_idx"] <= 2:
+                        cdist = ((det_cx - candidate["cx"]) ** 2 + (det_cy - candidate["cy"]) ** 2) ** 0.5
+                        if cdist < 0.1:
+                            candidate["count"] += 1
+                            candidate["cx"] = det_cx
+                            candidate["cy"] = det_cy
+                            candidate["frame_idx"] = self._frame_counter
+                            candidate["det_idx"] = det_idx
+                        else:
+                            self.relock_candidates[best_g_tid] = {
+                                "cx": det_cx, "cy": det_cy, "count": 1,
+                                "frame_idx": self._frame_counter, "det_idx": det_idx,
+                            }
+                    else:
+                        self.relock_candidates[best_g_tid] = {
+                            "cx": det_cx, "cy": det_cy, "count": 1,
+                            "frame_idx": self._frame_counter, "det_idx": det_idx,
+                        }
+
+                    if self.relock_candidates.get(best_g_tid, {}).get("count", 0) >= 3:
+                        assignments[det_idx] = best_g_tid
+                        self.track_avg_area[best_g_tid] = self.graveyard_area.pop(best_g_tid)
+                        self.track_velocity[best_g_tid] = (0.0, 0.0)
+                        if best_g_tid in self.graveyard_histogram:
+                            self.track_histogram[best_g_tid] = self.graveyard_histogram.pop(best_g_tid)
+                        del self.graveyard[best_g_tid]
+                        del self.graveyard_age[best_g_tid]
+                        self.graveyard_velocity.pop(best_g_tid, None)
+                        del self.relock_candidates[best_g_tid]
+                        unrecovered_group_graves.remove(best_g_tid)
+                        relock_recovered.append(det_idx)
+                        logger.info(f"Re-locked track {best_g_tid} via appearance (score={best_app:.2f})")
+
+        still_unmatched = [i for i in still_unmatched if i not in relock_recovered]
+
         # Assign new IDs to remaining unmatched detections
         for det_idx in still_unmatched:
             assignments[det_idx] = self.next_id
@@ -454,6 +532,13 @@ class SimpleTracker:
 
         self.active_tracks = new_tracks
         self.missing_count = new_missing
+        self._frame_counter += 1
+
+        # Clean stale relock candidates (not seen for >5 frames)
+        stale = [tid for tid, c in self.relock_candidates.items()
+                 if self._frame_counter - c["frame_idx"] > 5]
+        for tid in stale:
+            del self.relock_candidates[tid]
 
         # Update group formation distances (only from visible group members)
         self._update_group_distances()

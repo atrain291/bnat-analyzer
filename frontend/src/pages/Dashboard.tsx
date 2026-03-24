@@ -302,12 +302,20 @@ export default function Dashboard() {
           <Upload size={20} /> Upload Video
         </h2>
 
-        <div
+        <label
           className="relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-600 p-12 hover:border-brand-500 transition-colors cursor-pointer"
           onDragOver={(e) => e.preventDefault()}
           onDrop={handleDrop}
-          onClick={() => fileInputRef.current?.click()}
         >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".mp4,.mov,.avi,.mkv,.webm"
+            className="absolute inset-0 overflow-hidden opacity-0 cursor-pointer"
+            style={{ width: '100%', height: '100%' }}
+            tabIndex={-1}
+            onChange={(e) => { setFile(e.target.files?.[0] ?? null); e.target.value = ""; }}
+          />
           <Upload size={48} className="text-gray-500 mb-4" />
           {file ? (
             <p className="text-white">
@@ -320,15 +328,7 @@ export default function Dashboard() {
               <p className="text-xs text-gray-500 mt-2">MP4, MOV, AVI, MKV, WebM supported (max 2GB)</p>
             </>
           )}
-        </div>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".mp4,.mov,.avi,.mkv,.webm"
-          className="absolute w-0 h-0 overflow-hidden opacity-0"
-          tabIndex={-1}
-          onChange={(e) => { setFile(e.target.files?.[0] ?? null); e.target.value = ""; }}
-        />
+        </label>
 
         {uploading && (
           <div className="space-y-2">

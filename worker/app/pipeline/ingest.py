@@ -9,13 +9,18 @@ logger = logging.getLogger(__name__)
 _NEEDS_TRANSCODE = {"hevc", "h265", "vp9", "av1"}
 
 
-def ensure_browser_playable(video_path: str) -> str:
+def ensure_browser_playable(video_path: str, progress_callback=None) -> str:
     """Transcode video to H.264+AAC if the codec isn't browser-compatible.
 
     Returns the (possibly new) video path. The original file is replaced in-place
     so the existing video_url/video_key remain valid.
     """
+    def _report(msg):
+        if progress_callback:
+            progress_callback(msg)
+
     # Probe the codec
+    _report("Probing video codec...")
     cmd = [
         "ffprobe", "-v", "quiet", "-print_format", "json",
         "-show_entries", "stream=codec_name,codec_type",
@@ -36,9 +41,11 @@ def ensure_browser_playable(video_path: str) -> str:
     codec = video_stream.get("codec_name", "h264")
     if codec not in _NEEDS_TRANSCODE:
         logger.info(f"Video codec {codec} is browser-compatible, no transcode needed")
+        _report("Codec is browser-compatible")
         return video_path
 
     logger.info(f"Video codec is {codec}, transcoding to H.264 for browser playback...")
+    _report(f"Transcoding {codec.upper()} to H.264 (GPU)...")
     out_path = video_path + ".h264.mp4"
 
     # Try GPU-accelerated transcode (CUVID decode + NVENC encode).
@@ -64,6 +71,7 @@ def ensure_browser_playable(video_path: str) -> str:
     result = subprocess.run(nvenc_cmd, capture_output=True, text=True)
     if result.returncode != 0:
         logger.warning(f"GPU transcode failed, falling back to CPU: {result.stderr[:200]}")
+        _report(f"Transcoding {codec.upper()} to H.264 (CPU, may take a few minutes)...")
         cpu_cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
             "-i", video_path,
@@ -77,6 +85,7 @@ def ensure_browser_playable(video_path: str) -> str:
 
     # Replace original with transcoded version
     os.replace(out_path, video_path)
+    _report("Transcode complete")
     logger.info(f"Transcode complete, replaced {video_path}")
     return video_path
 

@@ -5,13 +5,21 @@ import { getPerformanceStatus, deletePerformance, stopPerformance, PipelineProgr
 
 const STAGES = [
   { key: "ingest", label: "Ingest Video", weight: 3 },
+  { key: "beat_detection", label: "Beat Detection", weight: 4 },
   { key: "detection", label: "Detecting Dancers", weight: 7 },
-  { key: "pose_estimation", label: "Pose Estimation", weight: 55 },
+  { key: "pose_estimation", label: "Pose Estimation", weight: 50 },
   { key: "pose_analysis", label: "Pose Analysis", weight: 5 },
   { key: "llm_synthesis", label: "AI Coaching", weight: 15 },
-  { key: "scoring", label: "Scoring", weight: 5 },
+  { key: "scoring", label: "Scoring", weight: 6 },
   { key: "complete", label: "Complete", weight: 10 },
 ];
+
+function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+}
 
 export default function ProcessingStatus() {
   const { performanceId } = useParams<{ performanceId: string }>();
@@ -20,6 +28,8 @@ export default function ProcessingStatus() {
   const [progress, setProgress] = useState<PipelineProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stageStartTimes = useRef<Record<string, number>>({});
+  const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
     if (!performanceId) return;
@@ -53,6 +63,20 @@ export default function ProcessingStatus() {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, [performanceId, navigate]);
+
+  // Track when each stage starts
+  useEffect(() => {
+    if (progress?.stage && !stageStartTimes.current[progress.stage]) {
+      stageStartTimes.current[progress.stage] = Date.now();
+    }
+  }, [progress?.stage]);
+
+  // Tick every second to update elapsed times
+  useEffect(() => {
+    if (status === "complete" || status === "failed") return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [status]);
 
   const handleCancel = async () => {
     if (!performanceId) return;
@@ -100,14 +124,19 @@ export default function ProcessingStatus() {
           let stagePct = 0;
           if (isDone) stagePct = 100;
           else if (isActive && progress) {
-            const stageStart = STAGES.slice(0, idx).reduce((s, st) => s + st.weight, 0);
-            const stageEnd = stageStart + stage.weight;
-            stagePct = Math.min(100, ((progress.pct - stageStart) / (stageEnd - stageStart)) * 100);
+            const weightStart = STAGES.slice(0, idx).reduce((s, st) => s + st.weight, 0);
+            const weightEnd = weightStart + stage.weight;
+            stagePct = Math.min(100, ((progress.pct - weightStart) / (weightEnd - weightStart)) * 100);
           }
+
+          const stageStart = stageStartTimes.current[stage.key];
+          const elapsed = stageStart ? (isDone && !isActive
+            ? stageStartTimes.current[STAGES[idx + 1]?.key] || now
+            : now) - stageStart : 0;
 
           return (
             <div key={stage.key} className="rounded-lg bg-gray-800 p-4">
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center justify-between mb-1">
                 <div className="flex items-center gap-2">
                   {isDone ? (
                     <CheckCircle2 size={18} className="text-green-400" />
@@ -122,12 +151,22 @@ export default function ProcessingStatus() {
                     {stage.label}
                   </span>
                 </div>
-                {isActive && progress?.frame !== undefined && (
-                  <span className="text-xs text-gray-400">
-                    Frame {progress.frame} / {progress.total_frames}
-                  </span>
-                )}
+                <div className="flex items-center gap-3">
+                  {isActive && progress?.frame !== undefined && (
+                    <span className="text-xs text-gray-400">
+                      Frame {progress.frame} / {progress.total_frames}
+                    </span>
+                  )}
+                  {(isActive || isDone) && stageStart && elapsed > 0 && (
+                    <span className="text-xs text-gray-500">
+                      {formatElapsed(elapsed)}
+                    </span>
+                  )}
+                </div>
               </div>
+              {isActive && progress?.message && (
+                <p className="text-xs text-gray-400 ml-[26px] mb-2">{progress.message}</p>
+              )}
               <div className="h-1.5 rounded-full bg-gray-700 overflow-hidden">
                 <div
                   className={`h-full transition-all duration-500 ${

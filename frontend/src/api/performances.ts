@@ -11,6 +11,7 @@ export interface PipelineProgress {
   pct: number;
   frame?: number;
   total_frames?: number;
+  message?: string;
   gpu_mem_pct?: number;
   cpu_pct?: number;
 }

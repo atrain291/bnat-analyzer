@@ -43,6 +43,7 @@ services:
     volumes:
       - ./worker/app:/app/app:z
       - uploads:/app/uploads
+      - ${HOME}/bharatanatyam-data/trt_cache:/app/trt_cache:z
     env_file:
       - .env
     environment:

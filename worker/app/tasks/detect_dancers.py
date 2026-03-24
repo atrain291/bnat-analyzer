@@ -39,12 +39,12 @@ def run_detection(self, performance_id: int, video_path: str):
     update_progress = _make_progress_updater(performance_id, status="detecting")
 
     try:
-        update_progress("ingest", 5.0)
-        # Transcode HEVC/VP9/AV1 → H.264 so browsers can play the video
-        ensure_browser_playable(video_path)
+        update_progress("ingest", 2.0, message="Checking video codec...")
+        ensure_browser_playable(video_path, progress_callback=lambda msg: update_progress("ingest", 3.0, message=msg))
+        update_progress("ingest", 5.0, message="Extracting video metadata...")
         metadata = extract_metadata(video_path)
 
-        # Save detection frame
+        update_progress("ingest", 7.0, message="Saving preview frame...")
         frame_path = video_path.rsplit(".", 1)[0] + "_detection.jpg"
         _save_detection_frame(video_path, frame_path)
         video_key = video_path.split("/")[-1]
@@ -62,13 +62,14 @@ def run_detection(self, performance_id: int, video_path: str):
 
         def detection_progress(current: int, total: int):
             pct = 10.0 + (current / max(total, 1)) * 80.0
-            update_progress("detection", pct, frame=current, total_frames=total)
+            update_progress("detection", pct, frame=current, total_frames=total,
+                            message=f"Detecting persons... frame {current}/{total}")
 
-        update_progress("detection", 10.0, frame=0, total_frames=total_detect)
+        update_progress("detection", 10.0, frame=0, total_frames=total_detect,
+                        message="Starting person detection...")
         all_frames = run_detection_pass(video_path, metadata, max_frames=DETECTION_FRAMES, progress_callback=detection_progress)
 
-        # Run tracker
-        update_progress("detection", 92.0)
+        update_progress("detection", 92.0, message="Assigning stable IDs with tracker...")
         persons = run_tracker(all_frames, min_frame_ratio=0.2)
 
         # Consolidated: store detected persons + set awaiting_selection in one session

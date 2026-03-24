@@ -225,7 +225,7 @@ def delete_performance(performance_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Performance not found")
 
     # Revoke celery task if still processing
-    if performance.task_id and performance.status in ("queued", "processing"):
+    if performance.task_id and performance.status in ("queued", "processing", "detecting"):
         from app.tasks import celery_app
         celery_app.control.revoke(performance.task_id, terminate=True)
 
