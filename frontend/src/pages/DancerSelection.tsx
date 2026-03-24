@@ -289,7 +289,27 @@ export default function DancerSelection() {
               placeholder="Name this dancer..."
               className="w-full rounded bg-gray-700 px-3 py-1.5 text-sm text-white placeholder-gray-500 border border-gray-600 focus:border-brand-500 focus:outline-none"
             />
-            <div className="mt-2 text-xs text-gray-500">
+            {/* Appearance color swatches */}
+            {(persons[idx].appearance?.dominant_colors?.length ?? 0) > 0 && (
+              <div className="mt-2 flex items-center gap-2">
+                {persons[idx].appearance!.dominant_colors.map((c, ci) => (
+                  <div key={ci} className="flex items-center gap-1">
+                    <div
+                      className="w-4 h-4 rounded-sm border border-gray-600"
+                      style={{ backgroundColor: `rgb(${c.rgb[0]},${c.rgb[1]},${c.rgb[2]})` }}
+                      title={`${c.name} (${Math.round(c.pct * 100)}%)`}
+                    />
+                    <span className="text-xs text-gray-400 capitalize">{c.name}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {persons[idx].appearance?.description && (
+              <div className="mt-1 text-xs text-gray-400 italic">
+                {persons[idx].appearance.description}
+              </div>
+            )}
+            <div className="mt-1 text-xs text-gray-500">
               Visible in {persons[idx].frame_count} frames
             </div>
           </div>

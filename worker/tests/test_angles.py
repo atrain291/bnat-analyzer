@@ -1,4 +1,4 @@
-from app.pipeline.angles import compute_frame_angles, summarize_pose_statistics
+from app.pipeline.angles import compute_frame_angles, summarize_pose_statistics, OnlineAngleAccumulator
 
 
 def _make_point(x, y, confidence=0.9):
@@ -135,3 +135,32 @@ def test_summarize_pose_statistics():
 def test_summarize_pose_statistics_empty():
     assert summarize_pose_statistics([]) == {}
     assert summarize_pose_statistics([{"dancer_pose": {}}]) == {}
+
+
+def test_online_accumulator_matches_batch():
+    """OnlineAngleAccumulator.summarize() must match summarize_pose_statistics output."""
+    frames = [{"dancer_pose": _aramandi_pose()} for _ in range(20)]
+    batch_summary = summarize_pose_statistics(frames)
+
+    accum = OnlineAngleAccumulator()
+    for fd in frames:
+        angles = compute_frame_angles(fd["dancer_pose"])
+        accum.add_frame(angles, timestamp_ms=0, pose=fd["dancer_pose"])
+    online_summary = accum.summarize()
+
+    for key in batch_summary:
+        assert key in online_summary, f"Missing key in online summary: {key}"
+        bv = batch_summary[key]
+        ov = online_summary[key]
+        if bv is None:
+            assert ov is None, f"Key {key}: batch=None but online={ov}"
+        else:
+            assert abs(bv - ov) < 1e-9, f"Key {key}: batch={bv} online={ov}"
+
+    for key in online_summary:
+        assert key in batch_summary, f"Extra key in online summary: {key}"
+
+
+def test_online_accumulator_empty():
+    accum = OnlineAngleAccumulator()
+    assert accum.summarize() == {}

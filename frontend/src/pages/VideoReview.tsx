@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { Play, Pause, SkipBack, Trash2, ArrowLeft } from "lucide-react";
 import { getPerformance, getPerformanceFrames, getPerformanceTimeline, deletePerformance, Performance, FrameData, AnalysisData, TimelineFrame } from "../api/performances";
@@ -55,8 +55,8 @@ interface ScoreDetail {
 function getScoreDetails(analysis: AnalysisData): ScoreDetail[] {
   const inputs = analysis.technique_scores?.inputs as Record<string, number> | undefined;
 
-  const fmt = (v: number | undefined, unit: string, decimals = 1) =>
-    v !== undefined ? `${v.toFixed(decimals)}${unit}` : "N/A";
+  const fmt = (v: number | undefined | null, unit: string, decimals = 1) =>
+    v != null ? `${v.toFixed(decimals)}${unit}` : "N/A";
 
   return [
     {
@@ -315,36 +315,43 @@ interface DanceTimelineProps {
 }
 
 function DanceTimeline({ timelineData, dancers, durationMs, currentTimeMs, beatTimestamps, tempoBpm, onSeek }: DanceTimelineProps) {
+  const { dancerIds, segmentsByDancer, syncInfo, usedMoves } = useMemo(() => {
+    if (!timelineData.length) {
+      return { dancerIds: [] as (number | null)[], segmentsByDancer: new Map<number | null, MoveSegment[]>(), syncInfo: null, usedMoves: new Set<MoveType>() };
+    }
+    // Group by dancer
+    const byDancer = new Map<number | null, TimelineFrame[]>();
+    for (const f of timelineData) {
+      const key = f.performance_dancer_id;
+      if (!byDancer.has(key)) byDancer.set(key, []);
+      byDancer.get(key)!.push(f);
+    }
+
+    const ids = dancers.length > 0 ? dancers.map((d) => d.id) : [null as number | null];
+    const segments = new Map<number | null, MoveSegment[]>();
+    for (const did of ids) {
+      const frames = byDancer.get(did) ?? [];
+      segments.set(did, buildSegments(frames));
+    }
+
+    // Compute sync between first two dancers if multi-dancer
+    let sync: { syncPercent: number; perSecond: { timeSec: number; sync: number }[] } | null = null;
+    if (ids.length >= 2 && ids[0] != null && ids[1] != null) {
+      sync = computeSyncScore(byDancer.get(ids[0]) ?? [], byDancer.get(ids[1]) ?? []);
+    }
+
+    // Collect unique moves present
+    const moves = new Set<MoveType>();
+    for (const [, segs] of segments) {
+      for (const seg of segs) moves.add(seg.move);
+    }
+
+    return { dancerIds: ids, segmentsByDancer: segments, syncInfo: sync, usedMoves: moves };
+  }, [timelineData, dancers]);
+
   if (!timelineData.length || !durationMs) return null;
 
-  // Group by dancer
-  const byDancer = new Map<number | null, TimelineFrame[]>();
-  for (const f of timelineData) {
-    const key = f.performance_dancer_id;
-    if (!byDancer.has(key)) byDancer.set(key, []);
-    byDancer.get(key)!.push(f);
-  }
-
-  const dancerIds = dancers.length > 0 ? dancers.map((d) => d.id) : [null as number | null];
-  const segmentsByDancer = new Map<number | null, MoveSegment[]>();
-  for (const did of dancerIds) {
-    const frames = byDancer.get(did) ?? [];
-    segmentsByDancer.set(did, buildSegments(frames));
-  }
-
-  // Compute sync between first two dancers if multi-dancer
-  let syncInfo: { syncPercent: number; perSecond: { timeSec: number; sync: number }[] } | null = null;
-  if (dancerIds.length >= 2 && dancerIds[0] != null && dancerIds[1] != null) {
-    syncInfo = computeSyncScore(byDancer.get(dancerIds[0]) ?? [], byDancer.get(dancerIds[1]) ?? []);
-  }
-
   const playheadPct = durationMs > 0 ? (currentTimeMs / durationMs) * 100 : 0;
-
-  // Collect unique moves present
-  const usedMoves = new Set<MoveType>();
-  for (const [, segs] of segmentsByDancer) {
-    for (const seg of segs) usedMoves.add(seg.move);
-  }
 
   return (
     <div className="rounded-lg bg-gray-800 p-4 space-y-3">

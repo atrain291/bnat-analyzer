@@ -48,6 +48,7 @@ class DetectedPersonResponse(BaseModel):
     representative_pose: dict
     frame_count: int
     area: float
+    appearance: dict | None = None
 
 
 class PerformanceDancerResponse(BaseModel):

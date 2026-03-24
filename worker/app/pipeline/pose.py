@@ -255,10 +255,10 @@ def run_pose_estimation(
     metadata: dict,
     progress_callback: Callable[[int, int], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
-) -> list[dict]:
-    """Run RTMPose WholeBody on each frame and return normalized keypoints.
+):
+    """Yield per-frame pose dicts from RTMPose WholeBody (133 keypoints).
 
-    Returns 133 keypoints per frame: 17 body + 6 feet + 68 face + 42 hands.
+    Yields dicts with dancer_pose, left_hand, right_hand, face, timestamp_ms.
     """
 
     model = _init_model()
@@ -275,7 +275,6 @@ def run_pose_estimation(
     logger.info(f"Starting pose estimation (RTMPose WholeBody 133-pt): {total_frames} frames at {fps:.1f} fps")
 
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    frames_data = []
     frame_idx = 0
 
     try:
@@ -291,7 +290,7 @@ def run_pose_estimation(
 
             pose_data = _extract_pose_data(keypoints, scores, w, h)
             pose_data["timestamp_ms"] = timestamp_ms
-            frames_data.append(pose_data)
+            yield pose_data
 
             frame_idx += 1
             if progress_callback and frame_idx % 10 == 0:
@@ -304,8 +303,7 @@ def run_pose_estimation(
         process.stdout.close()
         process.wait()
 
-    logger.info(f"Pose estimation complete: {len(frames_data)} frames processed")
-    return frames_data
+    logger.info(f"Pose estimation complete: {frame_idx} frames processed")
 
 
 def run_detection_pass(
@@ -317,7 +315,10 @@ def run_detection_pass(
     """Run pose estimation on the first N frames, returning ALL persons per frame.
 
     Returns a list of frames, each containing a list of person dicts.
+    Each person dict includes 'appearance' and 'color_histogram' extracted from the frame.
     """
+    from app.pipeline.appearance import extract_appearance
+
     model = _init_model()
 
     fps = metadata["fps"]
@@ -345,6 +346,16 @@ def run_detection_pass(
             keypoints, scores = model(frame)
 
             persons = _extract_all_poses(keypoints, scores, w, h)
+
+            # Extract appearance for each detected person
+            for person in persons:
+                try:
+                    appearance = extract_appearance(frame, person["bbox"], normalized=True)
+                    person["appearance"] = appearance
+                    person["color_histogram"] = appearance.get("color_histogram", [])
+                except Exception:
+                    pass
+
             all_frames.append(persons)
 
             frame_idx += 1
@@ -367,23 +378,26 @@ def run_pose_estimation_multi(
     progress_callback: Callable[[int, int], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
     seed_bboxes: dict[int, tuple] | None = None,
-) -> dict[int, list[dict]]:
-    """Run pose estimation on all frames, tracking selected persons only.
+    seed_histograms: dict[int, list[float]] | None = None,
+):
+    """Yield (track_id, frame_dict) tuples for selected persons.
 
     Args:
         seed_bboxes: {track_id: (x_min, y_min, x_max, y_max)} from detection pass.
             Seeds the tracker so it assigns the same IDs as the detection pass.
+        seed_histograms: {track_id: [float, ...]} color histograms from detection pass.
 
-    Returns {track_id: [frame_data_dicts]} for selected tracks only.
+    Yields (track_id, frame_data_dict) for selected tracks only.
     """
     from app.pipeline.tracker import SimpleTracker
+    from app.pipeline.appearance import extract_appearance
 
     model = _init_model()
     tracker = SimpleTracker()
 
-    # Seed tracker with known positions from detection pass
+    # Seed tracker with known positions, appearance, and group membership
     if seed_bboxes:
-        tracker.seed(seed_bboxes)
+        tracker.seed(seed_bboxes, histograms=seed_histograms, group_ids=selected_track_ids)
 
     fps = metadata["fps"]
     width = metadata["width"]
@@ -397,7 +411,7 @@ def run_pose_estimation_multi(
     logger.info(f"Multi-person pose estimation: tracking {len(selected_track_ids)} persons across {total_frames} frames")
 
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    results: dict[int, list[dict]] = {tid: [] for tid in selected_track_ids}
+    frame_counts: dict[int, int] = {tid: 0 for tid in selected_track_ids}
     frame_idx = 0
 
     try:
@@ -414,13 +428,26 @@ def run_pose_estimation_multi(
 
             if persons:
                 bboxes = [p["bbox"] for p in persons]
-                track_ids = tracker.update(bboxes)
+
+                # Extract appearance every 5th frame (balance speed vs accuracy)
+                hists = None
+                if frame_idx % 5 == 0:
+                    hists = []
+                    for p in persons:
+                        try:
+                            app = extract_appearance(frame, p["bbox"], normalized=True)
+                            hists.append(app.get("color_histogram", []))
+                        except Exception:
+                            hists.append(None)
+
+                track_ids = tracker.update(bboxes, histograms=hists)
 
                 for det_idx, tid in enumerate(track_ids):
                     if tid in selected_track_ids:
                         person = persons[det_idx]
                         person["timestamp_ms"] = timestamp_ms
-                        results[tid].append(person)
+                        frame_counts[tid] += 1
+                        yield (tid, person)
 
             frame_idx += 1
             if progress_callback and frame_idx % 10 == 0:
@@ -433,6 +460,5 @@ def run_pose_estimation_multi(
         process.stdout.close()
         process.wait()
 
-    for tid, frames in results.items():
-        logger.info(f"Track {tid}: {len(frames)} frames captured")
-    return results
+    for tid, count in frame_counts.items():
+        logger.info(f"Track {tid}: {count} frames captured")

@@ -366,6 +366,254 @@ def compute_frame_angles(
     return angles
 
 
+class _WelfordAccum:
+    """Single-metric online accumulator (Welford's algorithm)."""
+    __slots__ = ("n", "mean", "m2", "lo", "hi")
+
+    def __init__(self):
+        self.n = 0
+        self.mean = 0.0
+        self.m2 = 0.0
+        self.lo = float("inf")
+        self.hi = float("-inf")
+
+    def add(self, x: float):
+        self.n += 1
+        delta = x - self.mean
+        self.mean += delta / self.n
+        self.m2 += delta * (x - self.mean)
+        if x < self.lo:
+            self.lo = x
+        if x > self.hi:
+            self.hi = x
+
+    def avg(self):
+        return self.mean if self.n else None
+
+    def std(self):
+        if self.n < 2:
+            return None
+        return math.sqrt(self.m2 / self.n)
+
+    def minimum(self):
+        return self.lo if self.n else None
+
+    def maximum(self):
+        return self.hi if self.n else None
+
+
+class OnlineAngleAccumulator:
+    """Accumulates per-frame angles in a single streaming pass.
+
+    Produces the same summary dict as ``summarize_pose_statistics`` but
+    without storing any per-frame data.  Also collects foot-flatness
+    time-series needed by ``detect_foot_strikes``.
+    """
+
+    # All metric keys we track — each gets a _WelfordAccum
+    _METRIC_KEYS = [
+        "avg_knee_angle", "torso_angle",
+        "arm_extension_left", "arm_extension_right",
+        "hip_symmetry",
+        "left_foot_turnout", "right_foot_turnout",
+        "left_foot_flatness", "right_foot_flatness",
+        "head_lateral_tilt", "head_forward_tilt",
+        "left_wrist_flexion", "right_wrist_flexion",
+        "left_finger_extension", "right_finger_extension",
+        "left_thumb_extension", "right_thumb_extension",
+        "left_shoulder_elevation", "right_shoulder_elevation",
+        "shoulder_elevation_avg",
+        "neck_lateral_tilt_abs",
+        # 3D keys (from WHAM, optional)
+        "knee_angle_3d", "left_knee_angle_3d", "right_knee_angle_3d",
+        "torso_angle_3d",
+        "arm_extension_left_3d", "arm_extension_right_3d",
+        "hip_abduction_left", "hip_abduction_right",
+        "hip_symmetry_3d", "torso_twist",
+    ]
+
+    def __init__(self):
+        self._accums: dict[str, _WelfordAccum] = {k: _WelfordAccum() for k in self._METRIC_KEYS}
+        self._accums["head_lateral_tilt_abs"] = _WelfordAccum()
+        # For combined foot turnout (uses both left + right values)
+        self._accums["foot_turnout_all"] = _WelfordAccum()
+        # Combined foot flatness
+        self._accums["foot_flatness_all"] = _WelfordAccum()
+        # Combined wrist flexion
+        self._accums["wrist_flexion_all"] = _WelfordAccum()
+        # Foot flatness time-series for beat detection
+        self.foot_flatness_timestamps: list[int] = []
+        self.foot_flatness_values: list[float] = []
+
+    def add_frame(self, angles: dict, timestamp_ms: int = 0, pose: dict | None = None):
+        """Ingest one frame's angle dict (from compute_frame_angles)."""
+        for key in self._METRIC_KEYS:
+            val = angles.get(key)
+            if val is not None:
+                self._accums[key].add(val)
+
+        # head_lateral_tilt_abs
+        hlt = angles.get("head_lateral_tilt")
+        if hlt is not None:
+            self._accums["head_lateral_tilt_abs"].add(abs(hlt))
+
+        # Combined foot turnout
+        for side in ("left_foot_turnout", "right_foot_turnout"):
+            val = angles.get(side)
+            if val is not None:
+                self._accums["foot_turnout_all"].add(val)
+
+        # Combined foot flatness (only when both feet have data, matching batch behavior)
+        lff = angles.get("left_foot_flatness")
+        rff = angles.get("right_foot_flatness")
+        if lff is not None and rff is not None:
+            self._accums["foot_flatness_all"].add(lff)
+            self._accums["foot_flatness_all"].add(rff)
+
+        # Combined wrist flexion
+        for side in ("left_wrist_flexion", "right_wrist_flexion"):
+            val = angles.get(side)
+            if val is not None:
+                self._accums["wrist_flexion_all"].add(val)
+
+        # Foot flatness time-series for detect_foot_strikes
+        if pose:
+            flat = self._extract_foot_flatness(pose)
+            if flat is not None:
+                self.foot_flatness_timestamps.append(timestamp_ms)
+                self.foot_flatness_values.append(flat)
+
+    @staticmethod
+    def _extract_foot_flatness(pose: dict) -> float | None:
+        left_heel = pose.get("left_heel", {})
+        left_toe = pose.get("left_big_toe", {})
+        right_heel = pose.get("right_heel", {})
+        right_toe = pose.get("right_big_toe", {})
+
+        left_flat = None
+        right_flat = None
+        if left_heel.get("confidence", 0) > 0.3 and left_toe.get("confidence", 0) > 0.3:
+            left_flat = abs(left_heel["y"] - left_toe["y"])
+        if right_heel.get("confidence", 0) > 0.3 and right_toe.get("confidence", 0) > 0.3:
+            right_flat = abs(right_heel["y"] - right_toe["y"])
+
+        if left_flat is not None and right_flat is not None:
+            return min(left_flat, right_flat)
+        return left_flat if left_flat is not None else right_flat
+
+    def summarize(self) -> dict:
+        """Return summary dict matching the format of summarize_pose_statistics."""
+        a = self._accums
+        summary = {}
+
+        # Knee angles (with min/max/std)
+        if a["avg_knee_angle"].n:
+            summary["avg_knee_angle"] = a["avg_knee_angle"].avg()
+            summary["min_knee_angle"] = a["avg_knee_angle"].minimum()
+            summary["max_knee_angle"] = a["avg_knee_angle"].maximum()
+            summary["knee_angle_std"] = a["avg_knee_angle"].std()
+
+        if a["torso_angle"].n:
+            summary["avg_torso_angle"] = a["torso_angle"].avg()
+        if a["arm_extension_left"].n:
+            summary["avg_arm_extension_left"] = a["arm_extension_left"].avg()
+        if a["arm_extension_right"].n:
+            summary["avg_arm_extension_right"] = a["arm_extension_right"].avg()
+        if a["hip_symmetry"].n:
+            summary["hip_symmetry_avg"] = a["hip_symmetry"].avg()
+
+        # Foot turnout
+        if a["left_foot_turnout"].n:
+            summary["avg_foot_turnout_left"] = a["left_foot_turnout"].avg()
+        if a["right_foot_turnout"].n:
+            summary["avg_foot_turnout_right"] = a["right_foot_turnout"].avg()
+        if a["foot_turnout_all"].n:
+            summary["avg_foot_turnout"] = a["foot_turnout_all"].avg()
+
+        # Foot flatness
+        if a["foot_flatness_all"].n:
+            summary["avg_foot_flatness"] = a["foot_flatness_all"].avg()
+
+        # Head tilt
+        if a["head_lateral_tilt"].n:
+            summary["avg_head_lateral_tilt"] = a["head_lateral_tilt"].avg()
+            summary["avg_head_lateral_tilt_abs"] = a["head_lateral_tilt_abs"].avg()
+        if a["head_forward_tilt"].n:
+            summary["avg_head_forward_tilt"] = a["head_forward_tilt"].avg()
+
+        # Wrist flexion
+        if a["left_wrist_flexion"].n:
+            summary["avg_wrist_flexion_left"] = a["left_wrist_flexion"].avg()
+        if a["right_wrist_flexion"].n:
+            summary["avg_wrist_flexion_right"] = a["right_wrist_flexion"].avg()
+        if a["wrist_flexion_all"].n:
+            summary["avg_wrist_flexion"] = a["wrist_flexion_all"].avg()
+
+        # Finger extension
+        if a["left_finger_extension"].n:
+            summary["avg_finger_extension_left"] = a["left_finger_extension"].avg()
+        if a["right_finger_extension"].n:
+            summary["avg_finger_extension_right"] = a["right_finger_extension"].avg()
+        if a["left_thumb_extension"].n:
+            summary["avg_thumb_extension_left"] = a["left_thumb_extension"].avg()
+        if a["right_thumb_extension"].n:
+            summary["avg_thumb_extension_right"] = a["right_thumb_extension"].avg()
+
+        # Shoulder elevation
+        if a["left_shoulder_elevation"].n:
+            summary["avg_shoulder_elevation_left"] = a["left_shoulder_elevation"].avg()
+        if a["right_shoulder_elevation"].n:
+            summary["avg_shoulder_elevation_right"] = a["right_shoulder_elevation"].avg()
+        if a["shoulder_elevation_avg"].n:
+            summary["avg_shoulder_elevation"] = a["shoulder_elevation_avg"].avg()
+
+        # Neck tilt
+        if a["neck_lateral_tilt_abs"].n:
+            summary["avg_neck_lateral_tilt"] = a["neck_lateral_tilt_abs"].avg()
+            summary["max_neck_lateral_tilt"] = a["neck_lateral_tilt_abs"].maximum()
+
+        # --- 3D summaries ---
+        if a["knee_angle_3d"].n:
+            summary["avg_knee_angle_3d"] = a["knee_angle_3d"].avg()
+            summary["knee_angle_3d_std"] = a["knee_angle_3d"].std()
+            summary["min_knee_angle_3d"] = a["knee_angle_3d"].minimum()
+            summary["max_knee_angle_3d"] = a["knee_angle_3d"].maximum()
+        if a["left_knee_angle_3d"].n:
+            summary["avg_left_knee_angle_3d"] = a["left_knee_angle_3d"].avg()
+        if a["right_knee_angle_3d"].n:
+            summary["avg_right_knee_angle_3d"] = a["right_knee_angle_3d"].avg()
+        if a["torso_angle_3d"].n:
+            summary["avg_torso_angle_3d"] = a["torso_angle_3d"].avg()
+            summary["torso_angle_3d_std"] = a["torso_angle_3d"].std()
+        if a["arm_extension_left_3d"].n:
+            summary["avg_arm_extension_left_3d"] = a["arm_extension_left_3d"].avg()
+        if a["arm_extension_right_3d"].n:
+            summary["avg_arm_extension_right_3d"] = a["arm_extension_right_3d"].avg()
+        if a["hip_abduction_left"].n:
+            summary["avg_hip_abduction_left"] = a["hip_abduction_left"].avg()
+        if a["hip_abduction_right"].n:
+            summary["avg_hip_abduction_right"] = a["hip_abduction_right"].avg()
+        if a["hip_symmetry_3d"].n:
+            summary["avg_hip_symmetry_3d"] = a["hip_symmetry_3d"].avg()
+        if a["torso_twist"].n:
+            summary["avg_torso_twist"] = a["torso_twist"].avg()
+            summary["torso_twist_std"] = a["torso_twist"].std()
+            summary["max_torso_twist"] = a["torso_twist"].maximum()
+
+        # Composite balance score (same logic as summarize_pose_statistics)
+        balance_components = []
+        if a["torso_angle"].n:
+            avg_torso = summary["avg_torso_angle"]
+            balance_components.append(max(0.0, min(1.0, 1.0 - (avg_torso - 2) / 13)))
+        if a["hip_symmetry"].n:
+            avg_hip = summary["hip_symmetry_avg"]
+            balance_components.append(max(0.0, min(1.0, 1.0 - (avg_hip - 0.02) / 0.13)))
+        if balance_components:
+            summary["balance_score"] = sum(balance_components) / len(balance_components)
+
+        return summary
+
+
 def summarize_pose_statistics(frames_data: list[dict]) -> dict:
     """Aggregate angle statistics across all frames for LLM context.
 

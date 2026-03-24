@@ -2,54 +2,47 @@ import logging
 import subprocess
 import traceback
 
-from celery import current_task
-
 from app.celery_app import app
 from app.db import get_session
 from app.models.performance import Performance, DetectedPerson
-from app.pipeline.ingest import extract_metadata
+from app.pipeline.ingest import extract_metadata, ensure_browser_playable
 from app.pipeline.pose import run_detection_pass
 from app.pipeline.tracker import run_tracker
+from app.tasks.video_pipeline import _make_progress_updater
 
 logger = logging.getLogger(__name__)
 
 DETECTION_FRAMES = 50
 
 
-def _update_progress(performance_id: int, stage: str, pct: float, **extra):
-    progress = {"stage": stage, "pct": round(pct, 1), **extra}
-    with get_session() as session:
-        perf = session.query(Performance).filter(Performance.id == performance_id).first()
-        if perf:
-            perf.pipeline_progress = progress
-            perf.status = "detecting"
-    current_task.update_state(state="PROGRESS", meta=progress)
-
-
 def _save_detection_frame(video_path: str, output_path: str):
-    """Extract first frame as JPEG for the selection screen."""
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-i", video_path,
-        "-vframes", "1",
-        "-q:v", "2",
-        output_path,
+    """Extract first frame as JPEG for the selection screen, using GPU decode if available."""
+    # Probe codec to use matching CUVID decoder
+    probe_cmd = [
+        "ffprobe", "-v", "quiet", "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name", "-of", "csv=p=0", video_path,
     ]
+    probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+    codec = probe.stdout.strip() if probe.returncode == 0 else ""
+
+    nvdec_codecs = {"h264": "h264_cuvid", "hevc": "hevc_cuvid", "vp9": "vp9_cuvid", "av1": "av1_cuvid"}
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    if codec in nvdec_codecs:
+        cmd += ["-hwaccel", "cuda", "-c:v", nvdec_codecs[codec]]
+    cmd += ["-i", video_path, "-vframes", "1", "-q:v", "2", output_path]
     subprocess.run(cmd, check=True)
 
 
 @app.task(bind=True, name="worker.app.tasks.detect_dancers.run_detection")
 def run_detection(self, performance_id: int, video_path: str):
     logger.info(f"Starting detection for performance {performance_id}: {video_path}")
+    update_progress = _make_progress_updater(performance_id, status="detecting")
 
     try:
-        _update_progress(performance_id, "ingest", 5.0)
+        update_progress("ingest", 5.0)
+        # Transcode HEVC/VP9/AV1 → H.264 so browsers can play the video
+        ensure_browser_playable(video_path)
         metadata = extract_metadata(video_path)
-
-        with get_session() as session:
-            perf = session.query(Performance).filter(Performance.id == performance_id).first()
-            if perf:
-                perf.duration_ms = metadata["duration_ms"]
 
         # Save detection frame
         frame_path = video_path.rsplit(".", 1)[0] + "_detection.jpg"
@@ -57,9 +50,11 @@ def run_detection(self, performance_id: int, video_path: str):
         video_key = video_path.split("/")[-1]
         detection_frame_key = video_key.rsplit(".", 1)[0] + "_detection.jpg"
 
+        # Consolidated: update duration_ms + detection_frame_url in one session
         with get_session() as session:
             perf = session.query(Performance).filter(Performance.id == performance_id).first()
             if perf:
+                perf.duration_ms = metadata["duration_ms"]
                 perf.detection_frame_url = f"/uploads/{detection_frame_key}"
 
         # Run detection pass
@@ -67,16 +62,16 @@ def run_detection(self, performance_id: int, video_path: str):
 
         def detection_progress(current: int, total: int):
             pct = 10.0 + (current / max(total, 1)) * 80.0
-            _update_progress(performance_id, "detection", pct, frame=current, total_frames=total)
+            update_progress("detection", pct, frame=current, total_frames=total)
 
-        _update_progress(performance_id, "detection", 10.0, frame=0, total_frames=total_detect)
+        update_progress("detection", 10.0, frame=0, total_frames=total_detect)
         all_frames = run_detection_pass(video_path, metadata, max_frames=DETECTION_FRAMES, progress_callback=detection_progress)
 
         # Run tracker
-        _update_progress(performance_id, "detection", 92.0)
+        update_progress("detection", 92.0)
         persons = run_tracker(all_frames, min_frame_ratio=0.2)
 
-        # Store detected persons
+        # Consolidated: store detected persons + set awaiting_selection in one session
         with get_session() as session:
             for person in persons:
                 dp = DetectedPerson(
@@ -86,11 +81,11 @@ def run_detection(self, performance_id: int, video_path: str):
                     representative_pose=person["representative_pose"],
                     frame_count=person["frame_count"],
                     area=person["area"],
+                    appearance=person.get("appearance"),
+                    color_histogram=person.get("color_histogram"),
                 )
                 session.add(dp)
 
-        # Set status to awaiting_selection
-        with get_session() as session:
             perf = session.query(Performance).filter(Performance.id == performance_id).first()
             if perf:
                 perf.status = "awaiting_selection"

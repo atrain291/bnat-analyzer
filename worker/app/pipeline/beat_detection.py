@@ -166,6 +166,46 @@ def detect_foot_strikes(
     return strike_timestamps
 
 
+def detect_foot_strikes_from_series(
+    timestamps: list[int],
+    flatness_values: list[float],
+    min_gap_ms: int = 100,
+) -> list[int]:
+    """Detect foot strikes from pre-extracted foot flatness time series.
+
+    Same algorithm as detect_foot_strikes but accepts pre-collected data
+    (from OnlineAngleAccumulator) instead of iterating frames_data.
+    """
+    if len(flatness_values) < 5:
+        return []
+
+    arr = np.array(flatness_values)
+
+    kernel = np.ones(3) / 3
+    smoothed = np.convolve(arr, kernel, mode="same")
+
+    derivative = np.diff(smoothed)
+
+    if len(derivative) == 0 or np.std(derivative) < 1e-8:
+        return []
+
+    threshold = -np.std(derivative) * 1.5
+    strike_indices = np.where(derivative < threshold)[0]
+
+    if len(strike_indices) == 0:
+        return []
+
+    strikes = [strike_indices[0]]
+    for idx in strike_indices[1:]:
+        gap = timestamps[idx] - timestamps[strikes[-1]] if idx < len(timestamps) else 0
+        if gap >= min_gap_ms:
+            strikes.append(idx)
+
+    strike_timestamps = [timestamps[i] for i in strikes if i < len(timestamps)]
+    logger.info(f"Foot strike detection: {len(strike_timestamps)} strikes from {len(flatness_values)} frames")
+    return strike_timestamps
+
+
 def score_rhythm_sync(
     onset_timestamps_ms: list[int],
     strike_timestamps_ms: list[int],

@@ -21,21 +21,31 @@ router = APIRouter(prefix="/api/performances", tags=["performances"])
 
 @router.get("/", response_model=list[PerformanceListItem])
 def list_performances(dancer_id: int | None = None, db: Session = Depends(get_db)):
-    query = db.query(Performance).order_by(Performance.created_at.desc())
+    from sqlalchemy import func
+
+    # Single query with subquery for best score (avoids N+1)
+    best_score_sq = (
+        db.query(
+            Analysis.performance_id,
+            func.max(Analysis.overall_score).label("best_score"),
+        )
+        .filter(Analysis.overall_score.isnot(None))
+        .group_by(Analysis.performance_id)
+        .subquery()
+    )
+
+    query = (
+        db.query(Performance, best_score_sq.c.best_score)
+        .outerjoin(best_score_sq, Performance.id == best_score_sq.c.performance_id)
+        .order_by(Performance.created_at.desc())
+    )
     if dancer_id is not None:
         query = query.filter(Performance.dancer_id == dancer_id)
-    performances = query.all()
 
     results = []
-    for perf in performances:
-        # Get overall score from first analysis (or highest among dancers)
-        best_score = db.query(Analysis.overall_score).filter(
-            Analysis.performance_id == perf.id,
-            Analysis.overall_score.isnot(None),
-        ).order_by(Analysis.overall_score.desc()).first()
-
+    for perf, best_score in query.all():
         item = PerformanceListItem.model_validate(perf)
-        item.overall_score = best_score[0] if best_score else None
+        item.overall_score = best_score
         results.append(item)
 
     return results
@@ -61,18 +71,30 @@ def get_performance(performance_id: int, db: Session = Depends(get_db)):
 
 @router.get("/{performance_id}/frames", response_model=list[FrameResponse])
 def get_performance_frames(performance_id: int, db: Session = Depends(get_db)):
-    """Return all frames for a performance. Loaded separately for performance."""
+    """Return all frames for a performance. Only loads columns needed for display."""
     from app.models.analysis import Frame
     performance = db.query(Performance).filter(Performance.id == performance_id).first()
     if not performance:
         raise HTTPException(status_code=404, detail="Performance not found")
-    frames = (
-        db.query(Frame)
+    # Only select columns in FrameResponse — skip heavy left_hand, right_hand, face JSON
+    rows = (
+        db.query(
+            Frame.id, Frame.timestamp_ms, Frame.dancer_pose,
+            Frame.performance_dancer_id, Frame.joints_3d,
+            Frame.world_position, Frame.foot_contact,
+        )
         .filter(Frame.performance_id == performance_id)
         .order_by(Frame.timestamp_ms)
         .all()
     )
-    return frames
+    return [
+        FrameResponse(
+            id=r.id, timestamp_ms=r.timestamp_ms, dancer_pose=r.dancer_pose,
+            performance_dancer_id=r.performance_dancer_id, joints_3d=r.joints_3d,
+            world_position=r.world_position, foot_contact=r.foot_contact,
+        )
+        for r in rows
+    ]
 
 
 @router.get("/{performance_id}/timeline", response_model=list[TimelineFrameResponse])

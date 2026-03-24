@@ -25,31 +25,35 @@ def run_wham_3d(self, performance_id: int, video_path: str, video_info: dict) ->
 
     try:
         with get_session() as session:
-            frames = (
-                session.query(Frame)
+            # Only load columns we need (avoids fetching heavy JSON we won't use)
+            rows = (
+                session.query(
+                    Frame.id, Frame.performance_dancer_id,
+                    Frame.timestamp_ms, Frame.dancer_pose
+                )
                 .filter(Frame.performance_id == performance_id)
                 .order_by(Frame.performance_dancer_id, Frame.timestamp_ms)
                 .all()
             )
 
-            if not frames:
+            if not rows:
                 logger.warning("No frames found for performance %d", performance_id)
                 return {"performance_id": performance_id, "status": "skipped", "reason": "no_frames"}
 
-            # Group frames by dancer
+            # Group by dancer — each row is (id, pd_id, ts, pose)
             dancers = {}
-            for f in frames:
-                key = f.performance_dancer_id  # None for single-dancer
+            for row in rows:
+                key = row[1]  # performance_dancer_id
                 if key not in dancers:
                     dancers[key] = []
-                dancers[key].append(f)
+                dancers[key].append(row)
 
             total_updated = 0
 
-            for dancer_id, dancer_frames in dancers.items():
+            for dancer_id, dancer_rows in dancers.items():
                 label = f"dancer {dancer_id}" if dancer_id else "solo"
-                poses = [f.dancer_pose if f.dancer_pose else {} for f in dancer_frames]
-                frame_db_ids = [f.id for f in dancer_frames]
+                poses = [r[3] if r[3] else {} for r in dancer_rows]  # dancer_pose
+                frame_db_ids = [r[0] for r in dancer_rows]  # frame id
 
                 valid_count = sum(1 for p in poses if p)
                 if valid_count < 10:
@@ -63,9 +67,9 @@ def run_wham_3d(self, performance_id: int, video_path: str, video_info: dict) ->
                     logger.warning("WHAM returned None for %s", label)
                     continue
 
-                # Map WHAM output frames back to DB frame IDs
+                # Map WHAM output frames back to DB frame IDs — batch update
                 wham_frame_indices = wham_result.get("frame_ids", list(range(wham_result["frame_count"])))
-                updated = 0
+                bulk_updates = []
 
                 for t in range(wham_result["frame_count"]):
                     if t >= len(wham_frame_indices):
@@ -74,28 +78,28 @@ def run_wham_3d(self, performance_id: int, video_path: str, video_info: dict) ->
                     if src_idx >= len(frame_db_ids):
                         break
 
-                    db_frame_id = frame_db_ids[src_idx]
-
-                    # Build update dict
-                    update = {}
+                    row = {"id": frame_db_ids[src_idx]}
                     j3d = wham_result["joints_3d"][t] if t < len(wham_result["joints_3d"]) else None
                     if j3d is not None:
-                        update["joints_3d"] = j3d
-
+                        row["joints_3d"] = j3d
                     wp = wham_result["world_positions"][t] if t < len(wham_result["world_positions"]) else None
                     if wp is not None:
-                        update["world_position"] = wp
-
+                        row["world_position"] = wp
                     fc = wham_result["foot_contacts"][t] if t < len(wham_result["foot_contacts"]) else None
                     if fc is not None:
-                        update["foot_contact"] = fc
+                        row["foot_contact"] = fc
 
-                    if update:
-                        session.query(Frame).filter(Frame.id == db_frame_id).update(update)
-                        updated += 1
+                    if len(row) > 1:  # has data beyond just 'id'
+                        bulk_updates.append(row)
 
-                    if updated % 500 == 0 and updated > 0:
-                        session.flush()
+                # Bulk update in batches of 1000
+                updated = 0
+                BATCH = 1000
+                for i in range(0, len(bulk_updates), BATCH):
+                    batch = bulk_updates[i:i + BATCH]
+                    session.bulk_update_mappings(Frame, batch)
+                    session.flush()
+                    updated += len(batch)
 
                 total_updated += updated
                 logger.info("Updated %d frames with 3D data for %s", updated, label)

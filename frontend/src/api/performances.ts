@@ -46,6 +46,11 @@ export interface AnalysisData {
   created_at: string;
 }
 
+export interface AppearanceInfo {
+  dominant_colors: { name: string; rgb: [number, number, number]; pct: number }[];
+  description: string;
+}
+
 export interface DetectedPerson {
   id: number;
   track_id: number;
@@ -53,6 +58,7 @@ export interface DetectedPerson {
   representative_pose: Record<string, { x: number; y: number; z: number; confidence: number }>;
   frame_count: number;
   area: number;
+  appearance: AppearanceInfo | null;
 }
 
 export interface PerformanceDancer {

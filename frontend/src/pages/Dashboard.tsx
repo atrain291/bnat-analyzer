@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Upload, UserPlus, Music, PlayCircle, Clock, CheckCircle2, Loader2, AlertCircle } from "lucide-react";
 import { listDancers, createDancer, Dancer } from "../api/dancers";
@@ -35,12 +35,15 @@ export default function Dashboard() {
   const [uploadPct, setUploadPct] = useState(0);
   const [error, setError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [performances, setPerformances] = useState<PerformanceListItem[]>([]);
 
   useEffect(() => {
     listDancers().then(setDancers).catch(() => {});
     listPerformances().then(setPerformances).catch(() => {});
   }, []);
+
+  const dancerMap = useMemo(() => new Map(dancers.map((d) => [d.id, d])), [dancers]);
 
   const handleCreateDancer = async () => {
     if (!newDancerName.trim()) return;
@@ -115,7 +118,7 @@ export default function Dashboard() {
           </h2>
           <div className="space-y-2">
             {performances.map((p) => {
-              const dancerName = dancers.find((d) => d.id === p.dancer_id)?.name;
+              const dancerName = dancerMap.get(p.dancer_id)?.name;
               const statusIcon =
                 p.status === "complete" ? <CheckCircle2 size={16} className="text-green-400" /> :
                 p.status === "failed" ? <AlertCircle size={16} className="text-red-400" /> :
@@ -300,10 +303,10 @@ export default function Dashboard() {
         </h2>
 
         <div
-          className="flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-600 p-12 hover:border-brand-500 transition-colors cursor-pointer"
+          className="relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-600 p-12 hover:border-brand-500 transition-colors cursor-pointer"
           onDragOver={(e) => e.preventDefault()}
           onDrop={handleDrop}
-          onClick={() => document.getElementById("file-input")?.click()}
+          onClick={() => fileInputRef.current?.click()}
         >
           <Upload size={48} className="text-gray-500 mb-4" />
           {file ? (
@@ -317,14 +320,15 @@ export default function Dashboard() {
               <p className="text-xs text-gray-500 mt-2">MP4, MOV, AVI, MKV, WebM supported (max 2GB)</p>
             </>
           )}
-          <input
-            id="file-input"
-            type="file"
-            accept=".mp4,.mov,.avi,.mkv,.webm"
-            className="hidden"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          />
         </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".mp4,.mov,.avi,.mkv,.webm"
+          className="absolute w-0 h-0 overflow-hidden opacity-0"
+          tabIndex={-1}
+          onChange={(e) => { setFile(e.target.files?.[0] ?? null); e.target.value = ""; }}
+        />
 
         {uploading && (
           <div className="space-y-2">

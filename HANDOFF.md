@@ -2,29 +2,52 @@
 
 ## Project Overview
 AI-powered Bharatanatyam dance form analysis tool. Upload practice videos and receive:
-- Multi-dancer detection and tracking (IoU + centroid + positional fallback)
+- Multi-dancer detection with appearance-based identification (clothing color)
+- Occlusion-robust tracking (IoU + centroid + size gating + velocity prediction + appearance + group coherence)
 - Real-time pose skeleton overlay (color-coded per dancer, 133 keypoints)
 - Per-dancer joint angle analysis (23 body+feet, 42 hands, 68 face)
 - AI coaching feedback via Claude API (per-dancer personalized)
 - Numeric scoring with clickable breakdowns and improvement tips
 - Movement timeline with synchronicity indicators
+- Automatic HEVC→H.264 transcode for browser playback (GPU-accelerated)
 
 ## Architecture
 - **Frontend**: React 18 + TypeScript + Vite + Tailwind CSS (port 5173)
 - **Backend**: FastAPI + SQLAlchemy 2.0 + Alembic (PostgreSQL 16, port 8000)
-- **Worker**: Celery + Redis + RTMPose WholeBody + FFmpeg (NVDEC GPU, CUDA 12.4)
+- **Worker**: Celery + Redis + RTMPose WholeBody + FFmpeg (NVDEC/NVENC GPU, CUDA 12.4)
 - **LLM**: Claude API for coaching synthesis
 - **Infra**: Podman-compose with CDI GPU passthrough on Fedora (SELinux)
 
 ## Pipeline Flow
-1. **Upload** → `dispatch_detection` runs first 50 frames detecting all persons
-2. **Detection** → IoU+centroid tracker with positional fallback assigns stable track IDs
-3. **Selection** → User selects and names dancers on `/select-dancers/:id`
-4. **Pipeline** → Per-dancer pose estimation (tracker seeded with detection bboxes)
-5. **Analysis** → Per-frame angles stored, aggregate statistics computed
-6. **Coaching** → Claude API generates per-dancer feedback with pose summary context
-7. **Scoring** → Numeric 0-100 scores (aramandi, upper body, symmetry, foot, overall)
-8. **Review** → Video with skeleton overlay, seekbar, timeline, score breakdowns
+1. **Upload** → saved to `/app/uploads/`
+2. **Transcode** → `ensure_browser_playable()` detects HEVC/VP9/AV1, GPU-transcodes to H.264+AAC (CUVID decode + NVENC encode, CPU fallback)
+3. **Detection** → first 50 frames, extracts all persons with appearance (dominant colors, 72-bin HSV histogram)
+4. **Tracking** → 6-layer tracker assigns stable IDs (size gating, velocity prediction, appearance matching, group coherence, extended memory, graveyard re-ID)
+5. **Selection** → User selects and names dancers on `/select-dancers/:id` (sees color swatches per dancer)
+6. **Pipeline** → Per-dancer pose estimation (tracker seeded with detection bboxes + histograms + group IDs)
+7. **Analysis** → Per-frame angles stored, aggregate statistics computed
+8. **Coaching** → Claude API generates per-dancer feedback with pose summary context
+9. **Scoring** → Numeric 0-100 scores (aramandi, upper body, symmetry, foot, overall)
+10. **Review** → Video with skeleton overlay, seekbar, timeline, score breakdowns
+
+### Tracker Occlusion Handling (tracker.py)
+The tracker was specifically hardened against walk-through occlusion (someone walking in front of the camera):
+
+| Layer | Parameter | Purpose |
+|-------|-----------|---------|
+| Size gating | `max_size_ratio=2.5` | Bystander near camera has much larger bbox → rejected |
+| Velocity prediction | `velocity_smoothing=0.3` | Predicts position during missing frames along smoothed velocity |
+| Appearance matching | `appearance_weight=0.3` | HSV histogram similarity blended with IoU; "red top" ≠ "black top" |
+| Group coherence | threshold 0.4 | Tracks pairwise distances between dancers; rejects matches that break formation |
+| Extended memory | `max_missing=90` | Tracks survive 3s invisible with position projected along velocity |
+| Graveyard re-ID | `graveyard_frames=300` | Expired tracks recoverable for 10s via predicted position + size + appearance |
+
+### Appearance System (appearance.py)
+- Extracts from upper 60% of bbox (torso region), trimmed 10% margins
+- 72-bin HSV histogram for tracker matching (exponential moving average)
+- Dominant colors with human-readable names for UI ("red and black top")
+- Stored on `DetectedPerson.appearance` (JSON) and `DetectedPerson.color_histogram` (JSON)
+- During full pipeline, appearance extracted every 5th frame
 
 ### Early Stop
 - User can stop processing at any point during pose estimation
@@ -99,7 +122,7 @@ All FKs have ON DELETE CASCADE at both ORM and DB levels.
 | GET | `/api/performances/{id}/status` | Polling during processing |
 | POST | `/api/performances/{id}/stop` | Early stop processing |
 | DELETE | `/api/performances/{id}` | Cascade delete |
-| GET | `/api/performances/{id}/detected-persons` | Detection results |
+| GET | `/api/performances/{id}/detected-persons` | Detection results (includes appearance) |
 | POST | `/api/performances/{id}/select-dancers` | Dancer selection |
 | POST | `/api/upload/` | Video upload |
 | GET/POST | `/api/dancers/` | Dancer CRUD |
@@ -160,11 +183,12 @@ bharatanatyam-analyzer/
 │   │   │   ├── video_pipeline.py   # Main pipeline (single + multi-dancer)
 │   │   │   └── detect_dancers.py   # Detection pass (first 50 frames)
 │   │   ├── pipeline/
-│   │   │   ├── ingest.py           # FFprobe metadata
+│   │   │   ├── ingest.py           # FFprobe metadata + HEVC→H.264 transcode
 │   │   │   ├── pose.py             # RTMPose WholeBody 133-pt + NVDEC
 │   │   │   ├── angles.py           # Joint angle computation (2D + 3D)
 │   │   │   ├── scoring.py          # Numeric scoring (0-100, prefers 3D)
-│   │   │   ├── tracker.py          # IoU + centroid + positional tracker
+│   │   │   ├── tracker.py          # 6-layer occlusion-robust tracker
+│   │   │   ├── appearance.py       # Color histogram + dominant color extraction
 │   │   │   ├── llm.py              # Claude API coaching
 │   │   │   ├── beat_detection.py   # Audio onset detection + rhythm scoring
 │   │   │   └── wham.py             # WHAM 3D dispatch client (fire-and-forget)
@@ -184,13 +208,13 @@ bharatanatyam-analyzer/
         ├── pages/
         │   ├── Dashboard.tsx          # Upload + performances list
         │   ├── ProcessingStatus.tsx    # Pipeline progress + stop button
-        │   ├── DancerSelection.tsx     # Multi-dancer selection
+        │   ├── DancerSelection.tsx     # Multi-dancer selection with color swatches
         │   └── VideoReview.tsx         # Skeleton overlay, seekbar, timeline, scores, coaching
         ├── components/Layout.tsx
         └── api/
             ├── client.ts              # Axios instance
             ├── dancers.ts
-            └── performances.ts        # All performance API calls
+            └── performances.ts        # All performance API calls + types
 ```
 
 ## Roadmap
@@ -206,9 +230,24 @@ bharatanatyam-analyzer/
 | Audio/beat detection + rhythm scoring | Done |
 | WHAM 3D integration (data model + angles + scoring) | Done |
 | WHAM 3D worker container (separate PyTorch 1.13.1 container) | Done |
+| Occlusion-robust tracking (appearance + velocity + group coherence) | Done |
+| Video transcode (HEVC→H.264, GPU-accelerated) | Done |
 | WHAM 3D end-to-end test | Not yet tested |
 | WHAM foot contact rhythm (Phase 2b) | Not started |
 | WHAM global trajectory / stage coverage (Phase 3) | Not started |
 | Mudra classification | Not started (table + finger data ready) |
 | Adavu classification | Not started |
 | Multi-camera 3D reconstruction | Not started |
+
+## Recent Changes (2026-03-23)
+- **Occlusion-robust tracker**: Replaced simple IoU+centroid tracker with 6-layer system (size gating, velocity prediction, appearance matching, group coherence, extended memory, graveyard re-ID)
+- **Appearance extraction**: New `appearance.py` — extracts dominant colors and HSV histograms from torso region per detected person
+- **Dancer selection UI**: Now shows color swatches and descriptions ("red and black top") per detected person
+- **Video transcode**: Auto-transcodes HEVC/VP9/AV1 → H.264+AAC at start of detection task (GPU NVENC with CPU fallback)
+- **DB migration**: `e1a2b3c4d5f6` added `appearance` and `color_histogram` columns to `detected_persons`
+- **Bugfix**: `fmt()` in VideoReview.tsx crashed on `null` values (`!== undefined` → `!= null`)
+
+## Known Issues / Watch Items
+- Tracker re-ID score threshold is 0.3 — may need tuning if false re-IDs occur
+- Group coherence threshold is 0.4 — dancers who move far apart (stage entrances) may trigger false rejection
+- Frame count per dancer may be low if occlusion is extreme — tracker discards frames it can't confidently assign

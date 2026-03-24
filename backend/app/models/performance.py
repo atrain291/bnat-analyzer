@@ -25,7 +25,7 @@ class Performance(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[int | None] = mapped_column(ForeignKey("sessions.id"), nullable=True)
-    dancer_id: Mapped[int] = mapped_column(ForeignKey("dancers.id"))
+    dancer_id: Mapped[int] = mapped_column(ForeignKey("dancers.id"), index=True)
 
     # Dance metadata
     item_name: Mapped[str | None] = mapped_column(String(300), nullable=True)  # e.g. "Alarippu", "Jatiswaram"
@@ -66,12 +66,14 @@ class DetectedPerson(Base):
     __tablename__ = "detected_persons"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"))
+    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"), index=True)
     track_id: Mapped[int] = mapped_column(Integer)
     bbox: Mapped[dict] = mapped_column(JSON)
     representative_pose: Mapped[dict] = mapped_column(JSON)
     frame_count: Mapped[int] = mapped_column(Integer)
     area: Mapped[float] = mapped_column(Float)
+    appearance: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    color_histogram: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     performance: Mapped["Performance"] = relationship(back_populates="detected_persons")
 
@@ -81,7 +83,7 @@ class PerformanceDancer(Base):
     __tablename__ = "performance_dancers"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"))
+    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"), index=True)
     track_id: Mapped[int] = mapped_column(Integer)
     label: Mapped[str | None] = mapped_column(String(200), nullable=True)
 

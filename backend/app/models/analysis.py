@@ -15,7 +15,7 @@ class Frame(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"))
-    performance_dancer_id: Mapped[int | None] = mapped_column(ForeignKey("performance_dancers.id", ondelete="CASCADE"), nullable=True)
+    performance_dancer_id: Mapped[int | None] = mapped_column(ForeignKey("performance_dancers.id", ondelete="CASCADE"), nullable=True, index=True)
     timestamp_ms: Mapped[int] = mapped_column(Integer)
 
     # 23-point body+feet keypoints: {keypoint_name: {x, y, z, confidence}}
@@ -107,8 +107,8 @@ class Analysis(Base):
     __tablename__ = "analyses"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"))
-    performance_dancer_id: Mapped[int | None] = mapped_column(ForeignKey("performance_dancers.id", ondelete="CASCADE"), nullable=True)
+    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"), index=True)
+    performance_dancer_id: Mapped[int | None] = mapped_column(ForeignKey("performance_dancers.id", ondelete="CASCADE"), nullable=True, index=True)
 
     # Scores (0-100)
     aramandi_score: Mapped[float | None] = mapped_column(Float, nullable=True)

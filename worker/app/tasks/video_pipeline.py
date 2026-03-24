@@ -1,4 +1,5 @@
 import logging
+import time
 import traceback
 
 from celery import current_task
@@ -8,15 +9,16 @@ from app.db import get_session
 from app.models.performance import Performance, PerformanceDancer, DetectedPerson, Frame, Analysis, JointAngleState, BalanceMetrics
 from app.pipeline.ingest import extract_metadata
 from app.pipeline.pose import run_pose_estimation, run_pose_estimation_multi
-from app.pipeline.angles import summarize_pose_statistics, compute_frame_angles
+from app.pipeline.angles import compute_frame_angles, OnlineAngleAccumulator
 from app.pipeline.llm import generate_coaching_feedback
 from app.pipeline.scoring import compute_scores
-from app.pipeline.beat_detection import run_beat_analysis, detect_foot_strikes, score_rhythm_sync
+from app.pipeline.beat_detection import run_beat_analysis, detect_foot_strikes_from_series, score_rhythm_sync
 from app.pipeline.wham import dispatch_wham_3d
 
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 300
+PROGRESS_DB_INTERVAL = 2.0  # seconds between Postgres progress writes
 
 
 def _make_cancel_checker(performance_id: int):
@@ -31,31 +33,138 @@ def _make_cancel_checker(performance_id: int):
     return is_cancelled
 
 
-def _update_progress(performance_id: int, stage: str, pct: float, **extra):
-    progress = {"stage": stage, "pct": round(pct, 1), **extra}
+def _make_progress_updater(performance_id: int, status: str = "processing"):
+    """Return a throttled progress-update callable.
 
-    with get_session() as session:
-        perf = session.query(Performance).filter(Performance.id == performance_id).first()
-        if perf:
-            perf.pipeline_progress = progress
-            perf.status = "processing"
+    The returned function always pushes to Redis (cheap) but only writes
+    to Postgres when the stage changes or PROGRESS_DB_INTERVAL has elapsed.
+    """
+    state = {"last_stage": None, "last_db_time": 0.0}
 
-    current_task.update_state(
-        state="PROGRESS",
-        meta=progress,
-    )
+    def update(stage: str, pct: float, final_status: str | None = None, **extra):
+        progress = {"stage": stage, "pct": round(pct, 1), **extra}
+
+        now = time.monotonic()
+        stage_changed = stage != state["last_stage"]
+        elapsed = now - state["last_db_time"]
+
+        if stage_changed or elapsed >= PROGRESS_DB_INTERVAL or final_status:
+            with get_session() as session:
+                perf = session.query(Performance).filter(
+                    Performance.id == performance_id
+                ).first()
+                if perf:
+                    perf.pipeline_progress = progress
+                    perf.status = final_status or status
+            state["last_stage"] = stage
+            state["last_db_time"] = now
+
+        current_task.update_state(state="PROGRESS", meta=progress)
+
+    return update
 
 
-def _store_frames_and_metrics(session, performance_id, performance_dancer_id, frames_data):
-    """Store frame rows with angles and balance metrics for one dancer."""
-    all_frames = []
-    batch = []
-    for fd in frames_data:
+def _store_frames_and_metrics(session, performance_id, performance_dancer_id, frames_iter):
+    """Store frame rows with angles and balance metrics in a single streaming pass.
+
+    Accepts any iterable of frame dicts (list or generator).  Computes angles
+    once per frame and accumulates running statistics via OnlineAngleAccumulator.
+
+    Returns (frame_count, accumulator) so the caller can get pose_summary
+    and foot-flatness data without a second pass.
+    """
+    accumulator = OnlineAngleAccumulator()
+    # pending_angles holds (frame_obj, angles_dict, fd) for frames awaiting ID assignment
+    pending_angles: list[tuple] = []
+    frame_batch = []
+    frame_count = 0
+
+    def _flush_batch():
+        """Flush accumulated frame rows, then create angle/balance rows for them."""
+        nonlocal frame_batch, pending_angles
+        if frame_batch:
+            session.add_all(frame_batch)
+            session.flush()  # assigns frame IDs
+            frame_batch = []
+
+        if not pending_angles:
+            return
+        angle_objs = []
+        balance_objs = []
+        for frame_obj, angles, fd in pending_angles:
+            pose = fd.get("dancer_pose", {})
+            angle_objs.append(JointAngleState(
+                frame_id=frame_obj.id,
+                aramandi_angle=angles.get("avg_knee_angle"),
+                torso_uprightness=angles.get("torso_angle"),
+                arm_extension_left=angles.get("arm_extension_left"),
+                arm_extension_right=angles.get("arm_extension_right"),
+                hip_symmetry=angles.get("hip_symmetry"),
+                knee_angle_3d=angles.get("knee_angle_3d"),
+                torso_angle_3d=angles.get("torso_angle_3d"),
+                hip_abduction_left=angles.get("hip_abduction_left"),
+                hip_abduction_right=angles.get("hip_abduction_right"),
+                torso_twist=angles.get("torso_twist"),
+                all_angles=angles,
+            ))
+
+            lh = pose.get("left_hip", {})
+            rh = pose.get("right_hip", {})
+            com_x = None
+            com_y = None
+            if lh.get("confidence", 0) > 0.3 and rh.get("confidence", 0) > 0.3:
+                com_x = (lh["x"] + rh["x"]) / 2
+                com_y = (lh["y"] + rh["y"]) / 2
+
+            hip_sym = angles.get("hip_symmetry")
+            weight_dist = None
+            if hip_sym is not None:
+                if lh.get("confidence", 0) > 0.3 and rh.get("confidence", 0) > 0.3:
+                    sign = 1.0 if lh["y"] > rh["y"] else -1.0
+                    weight_dist = max(-1.0, min(1.0, sign * hip_sym * 5.0))
+
+            stability_components = []
+            torso = angles.get("torso_angle")
+            if torso is not None:
+                stability_components.append(max(0.0, min(1.0, 1.0 - (torso - 2) / 13)))
+            if hip_sym is not None:
+                stability_components.append(max(0.0, min(1.0, 1.0 - (hip_sym - 0.02) / 0.13)))
+            stability = None
+            if stability_components:
+                stability = sum(stability_components) / len(stability_components)
+
+            j3d = fd.get("joints_3d")
+            com_3d_x = com_3d_y = com_3d_z = None
+            if j3d and len(j3d) >= 1:
+                com_3d_x = float(j3d[0][0])
+                com_3d_y = float(j3d[0][1])
+                com_3d_z = float(j3d[0][2])
+
+            balance_objs.append(BalanceMetrics(
+                frame_id=frame_obj.id,
+                center_of_mass_x=com_x,
+                center_of_mass_y=com_y,
+                weight_distribution=weight_dist,
+                stability_score=stability,
+                center_of_mass_3d_x=com_3d_x,
+                center_of_mass_3d_y=com_3d_y,
+                center_of_mass_3d_z=com_3d_z,
+            ))
+
+        session.add_all(angle_objs)
+        session.add_all(balance_objs)
+        session.flush()
+        pending_angles = []
+
+    for fd in frames_iter:
+        pose = fd.get("dancer_pose", {})
+        timestamp_ms = fd["timestamp_ms"]
+
         frame_obj = Frame(
             performance_id=performance_id,
             performance_dancer_id=performance_dancer_id,
-            timestamp_ms=fd["timestamp_ms"],
-            dancer_pose=fd["dancer_pose"],
+            timestamp_ms=timestamp_ms,
+            dancer_pose=pose,
             left_hand=fd.get("left_hand"),
             right_hand=fd.get("right_hand"),
             face=fd.get("face"),
@@ -63,119 +172,47 @@ def _store_frames_and_metrics(session, performance_id, performance_dancer_id, fr
             world_position=fd.get("world_position"),
             foot_contact=fd.get("foot_contact"),
         )
-        batch.append(frame_obj)
-        all_frames.append((frame_obj, fd))
-        if len(batch) >= BATCH_SIZE:
-            session.add_all(batch)
-            session.flush()
-            batch = []
-    if batch:
-        session.add_all(batch)
-        session.flush()
+        frame_batch.append(frame_obj)
+        frame_count += 1
 
-    angle_batch = []
-    balance_batch = []
-    for frame_obj, fd in all_frames:
-        pose = fd.get("dancer_pose", {})
-        if not pose:
-            continue
+        if pose:
+            angles = compute_frame_angles(
+                pose,
+                face=fd.get("face"),
+                left_hand=fd.get("left_hand"),
+                right_hand=fd.get("right_hand"),
+                joints_3d=fd.get("joints_3d"),
+            )
+            if angles:
+                accumulator.add_frame(angles, timestamp_ms=timestamp_ms, pose=pose)
+                pending_angles.append((frame_obj, angles, fd))
 
-        angles = compute_frame_angles(
-            pose,
-            face=fd.get("face"),
-            left_hand=fd.get("left_hand"),
-            right_hand=fd.get("right_hand"),
-            joints_3d=fd.get("joints_3d"),
-        )
-        if not angles:
-            continue
+        if len(frame_batch) >= BATCH_SIZE:
+            _flush_batch()
 
-        angle_batch.append(JointAngleState(
-            frame_id=frame_obj.id,
-            aramandi_angle=angles.get("avg_knee_angle"),
-            torso_uprightness=angles.get("torso_angle"),
-            arm_extension_left=angles.get("arm_extension_left"),
-            arm_extension_right=angles.get("arm_extension_right"),
-            hip_symmetry=angles.get("hip_symmetry"),
-            knee_angle_3d=angles.get("knee_angle_3d"),
-            torso_angle_3d=angles.get("torso_angle_3d"),
-            hip_abduction_left=angles.get("hip_abduction_left"),
-            hip_abduction_right=angles.get("hip_abduction_right"),
-            torso_twist=angles.get("torso_twist"),
-            all_angles=angles,
-        ))
+    # Flush remaining
+    _flush_batch()
 
-        lh = pose.get("left_hip", {})
-        rh = pose.get("right_hip", {})
-        com_x = None
-        com_y = None
-        if lh.get("confidence", 0) > 0.3 and rh.get("confidence", 0) > 0.3:
-            com_x = (lh["x"] + rh["x"]) / 2
-            com_y = (lh["y"] + rh["y"]) / 2
-
-        hip_sym = angles.get("hip_symmetry")
-        weight_dist = None
-        if hip_sym is not None:
-            if lh.get("confidence", 0) > 0.3 and rh.get("confidence", 0) > 0.3:
-                sign = 1.0 if lh["y"] > rh["y"] else -1.0
-                weight_dist = max(-1.0, min(1.0, sign * hip_sym * 5.0))
-
-        stability_components = []
-        torso = angles.get("torso_angle")
-        if torso is not None:
-            stability_components.append(max(0.0, min(1.0, 1.0 - (torso - 2) / 13)))
-        if hip_sym is not None:
-            stability_components.append(max(0.0, min(1.0, 1.0 - (hip_sym - 0.02) / 0.13)))
-        stability = None
-        if stability_components:
-            stability = sum(stability_components) / len(stability_components)
-
-        # 3D center of mass from WHAM joints (pelvis = joint 0)
-        j3d = fd.get("joints_3d")
-        com_3d_x = com_3d_y = com_3d_z = None
-        if j3d and len(j3d) >= 1:
-            com_3d_x = float(j3d[0][0])
-            com_3d_y = float(j3d[0][1])
-            com_3d_z = float(j3d[0][2])
-
-        balance_batch.append(BalanceMetrics(
-            frame_id=frame_obj.id,
-            center_of_mass_x=com_x,
-            center_of_mass_y=com_y,
-            weight_distribution=weight_dist,
-            stability_score=stability,
-            center_of_mass_3d_x=com_3d_x,
-            center_of_mass_3d_y=com_3d_y,
-            center_of_mass_3d_z=com_3d_z,
-        ))
-
-        if len(angle_batch) >= BATCH_SIZE:
-            session.add_all(angle_batch)
-            session.add_all(balance_batch)
-            session.flush()
-            angle_batch = []
-            balance_batch = []
-
-    if angle_batch:
-        session.add_all(angle_batch)
-    if balance_batch:
-        session.add_all(balance_batch)
-    if angle_batch or balance_batch:
-        session.flush()
-
-    return len(all_frames)
+    return frame_count, accumulator
 
 
-def _analyze_dancer(performance_id, performance_dancer_id, label, frames_data, metadata, beat_data=None):
-    """Run statistics, LLM coaching, scoring, and rhythm analysis for one dancer's frames."""
-    pose_summary = summarize_pose_statistics(frames_data)
+def _analyze_dancer(performance_id, performance_dancer_id, label, frame_count,
+                    pose_summary, metadata, beat_data=None, accumulator=None):
+    """Run LLM coaching, scoring, and rhythm analysis for one dancer.
 
+    Args:
+        frame_count: Number of frames processed for this dancer.
+        pose_summary: Pre-computed aggregate stats dict (from OnlineAngleAccumulator.summarize).
+        accumulator: OnlineAngleAccumulator with foot-flatness data for rhythm scoring.
+    """
     # Rhythm scoring: correlate foot strikes with audio onsets
     rhythm_score = None
     rhythm_details = {}
-    if beat_data and beat_data.get("onset_timestamps_ms"):
-        fps = metadata.get("fps", 30.0)
-        foot_strikes = detect_foot_strikes(frames_data, fps)
+    if beat_data and beat_data.get("onset_timestamps_ms") and accumulator:
+        foot_strikes = detect_foot_strikes_from_series(
+            accumulator.foot_flatness_timestamps,
+            accumulator.foot_flatness_values,
+        )
         sync_result = score_rhythm_sync(beat_data["onset_timestamps_ms"], foot_strikes)
         rhythm_score = sync_result.get("rhythm_score")
         rhythm_details = sync_result
@@ -192,7 +229,7 @@ def _analyze_dancer(performance_id, performance_dancer_id, label, frames_data, m
         talam = perf.talam if perf else None
 
     coaching_text = generate_coaching_feedback(
-        frame_count=len(frames_data),
+        frame_count=frame_count,
         duration_ms=metadata["duration_ms"],
         item_name=item_name,
         item_type=item_type,
@@ -228,10 +265,11 @@ def _analyze_dancer(performance_id, performance_dancer_id, label, frames_data, m
 @app.task(bind=True, name="worker.app.tasks.video_pipeline.run_pipeline")
 def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: list[dict] | None = None):
     logger.info(f"Starting pipeline for performance {performance_id}: {video_path}")
+    update_progress = _make_progress_updater(performance_id, status="processing")
 
     try:
         # Stage 1: Ingest
-        _update_progress(performance_id, "ingest", 5.0)
+        update_progress("ingest", 5.0)
         metadata = extract_metadata(video_path)
 
         with get_session() as session:
@@ -243,7 +281,7 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
         is_cancelled = _make_cancel_checker(performance_id)
 
         # Stage 1b: Audio beat detection (fast, CPU-only, runs before pose estimation)
-        _update_progress(performance_id, "beat_detection", 10.0)
+        update_progress("beat_detection", 10.0)
         beat_data = None
         try:
             beat_data = run_beat_analysis(video_path, metadata)
@@ -258,12 +296,13 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
             logger.warning(f"Beat detection failed (non-fatal): {e}")
 
         if selected_tracks:
-            # Multi-dancer mode
+            # Multi-dancer mode — stream frames through per-dancer accumulators
             track_id_to_info = {t["track_id"]: t for t in selected_tracks}
             selected_ids = set(track_id_to_info.keys())
 
-            # Fetch detection bboxes to seed the tracker with known positions
+            # Fetch detection bboxes and appearance to seed the tracker
             seed_bboxes = {}
+            seed_histograms = {}
             with get_session() as session:
                 detected = session.query(DetectedPerson).filter(
                     DetectedPerson.performance_id == performance_id
@@ -271,66 +310,81 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                 for dp in detected:
                     bbox = dp.bbox
                     seed_bboxes[dp.track_id] = (bbox["x_min"], bbox["y_min"], bbox["x_max"], bbox["y_max"])
+                    if dp.color_histogram:
+                        seed_histograms[dp.track_id] = dp.color_histogram
 
             def pose_progress(current_frame: int, total: int):
                 pct = 20.0 + (current_frame / max(total, 1)) * 60.0
-                _update_progress(performance_id, "pose_estimation", pct, frame=current_frame, total_frames=total)
+                update_progress("pose_estimation", pct, frame=current_frame, total_frames=total)
 
-            _update_progress(performance_id, "pose_estimation", 20.0, frame=0, total_frames=total_frames)
-            per_dancer_frames = run_pose_estimation_multi(
+            update_progress("pose_estimation", 20.0, frame=0, total_frames=total_frames)
+
+            # Stream (track_id, frame_dict) tuples from the generator, routing
+            # each frame to its dancer's per-dancer list for batch DB storage.
+            per_dancer_frames: dict[int, list[dict]] = {tid: [] for tid in selected_ids}
+            frame_gen = run_pose_estimation_multi(
                 video_path, metadata, selected_ids, progress_callback=pose_progress,
                 is_cancelled=is_cancelled, seed_bboxes=seed_bboxes,
+                seed_histograms=seed_histograms if seed_histograms else None,
             )
+            for tid, fd in frame_gen:
+                per_dancer_frames[tid].append(fd)
 
-            # Store frames per dancer
-            _update_progress(performance_id, "pose_analysis", 80.0)
-            total_stored = 0
+            # Store frames + compute stats per dancer (single pass each, no recomputation)
+            update_progress("pose_analysis", 80.0)
+            dancer_results: dict[int, tuple[int, dict, OnlineAngleAccumulator]] = {}
             for track_id, frames_data in per_dancer_frames.items():
                 info = track_id_to_info[track_id]
                 pd_id = info["performance_dancer_id"]
                 with get_session() as session:
-                    total_stored += _store_frames_and_metrics(session, performance_id, pd_id, frames_data)
+                    frame_count, accumulator = _store_frames_and_metrics(
+                        session, performance_id, pd_id, frames_data,
+                    )
+                pose_summary = accumulator.summarize()
+                dancer_results[track_id] = (frame_count, pose_summary, accumulator)
+                del frames_data  # allow GC before next dancer
 
-            # Analyze each dancer (runs on whatever frames were collected)
+            # Analyze each dancer with pre-computed stats (no second pass)
             num_dancers = len(selected_tracks)
-            for i, (track_id, frames_data) in enumerate(per_dancer_frames.items()):
+            for i, track_id in enumerate(dancer_results):
                 info = track_id_to_info[track_id]
+                frame_count, pose_summary, accumulator = dancer_results[track_id]
                 pct = 83.0 + (i / max(num_dancers, 1)) * 12.0
-                _update_progress(performance_id, "llm_synthesis", pct)
-                if frames_data:
+                update_progress("llm_synthesis", pct)
+                if frame_count:
                     _analyze_dancer(
                         performance_id, info["performance_dancer_id"],
-                        info.get("label"), frames_data, metadata, beat_data=beat_data,
+                        info.get("label"), frame_count, pose_summary, metadata,
+                        beat_data=beat_data, accumulator=accumulator,
                     )
 
         else:
-            # Single-dancer mode (backward compatible)
+            # Single-dancer mode — stream directly from generator through storage
             def pose_progress(current_frame: int, total: int):
                 pct = 20.0 + (current_frame / max(total, 1)) * 63.0
-                _update_progress(performance_id, "pose_estimation", pct, frame=current_frame, total_frames=total)
+                update_progress("pose_estimation", pct, frame=current_frame, total_frames=total)
 
-            _update_progress(performance_id, "pose_estimation", 20.0, frame=0, total_frames=total_frames)
-            frames_data = run_pose_estimation(video_path, metadata, progress_callback=pose_progress, is_cancelled=is_cancelled)
+            update_progress("pose_estimation", 20.0, frame=0, total_frames=total_frames)
+            frame_gen = run_pose_estimation(video_path, metadata, progress_callback=pose_progress, is_cancelled=is_cancelled)
 
             with get_session() as session:
-                _store_frames_and_metrics(session, performance_id, None, frames_data)
+                frame_count, accumulator = _store_frames_and_metrics(session, performance_id, None, frame_gen)
+            pose_summary = accumulator.summarize()
 
-            _update_progress(performance_id, "pose_analysis", 83.0)
-            _update_progress(performance_id, "llm_synthesis", 85.0)
-            _analyze_dancer(performance_id, None, None, frames_data, metadata, beat_data=beat_data)
+            update_progress("pose_analysis", 83.0)
+            update_progress("llm_synthesis", 85.0)
+            _analyze_dancer(
+                performance_id, None, None, frame_count, pose_summary, metadata,
+                beat_data=beat_data, accumulator=accumulator,
+            )
 
         # Dispatch WHAM 3D estimation (fire-and-forget, runs in separate container)
         video_info = {"width": metadata.get("width", 1920), "height": metadata.get("height", 1080), "fps": metadata.get("fps", 30)}
         dispatch_wham_3d(performance_id, video_path, video_info)
 
         # Complete
-        _update_progress(performance_id, "scoring", 95.0)
-        _update_progress(performance_id, "complete", 100.0)
-
-        with get_session() as session:
-            perf = session.query(Performance).filter(Performance.id == performance_id).first()
-            if perf:
-                perf.status = "complete"
+        update_progress("scoring", 95.0)
+        update_progress("complete", 100.0, final_status="complete")
 
         logger.info(f"Pipeline complete for performance {performance_id}")
         return {"status": "complete"}

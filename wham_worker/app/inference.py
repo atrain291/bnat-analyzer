@@ -7,8 +7,10 @@ within 12GB VRAM:
 
 Runs in --estimate_local_only mode (no DPVO/SLAM).
 """
+import json
 import logging
 import os
+import subprocess
 import sys
 
 import numpy as np
@@ -17,6 +19,46 @@ import torch
 logger = logging.getLogger(__name__)
 
 WHAM_PATH = "/opt/wham"
+
+# NVDEC codec mapping for GPU-accelerated video decoding
+_NVDEC_CODECS = {
+    "h264": "h264_cuvid",
+    "hevc": "hevc_cuvid",
+    "vp9": "vp9_cuvid",
+    "av1": "av1_cuvid",
+}
+
+
+def _probe_video_codec(video_path: str) -> str:
+    """Probe the video codec using ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "quiet", "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name", "-of", "csv=p=0", video_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _build_ffmpeg_read_cmd(video_path: str, width: int, height: int) -> list[str]:
+    """Build ffmpeg command for raw frame reading, with NVDEC if available."""
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+
+    codec = _probe_video_codec(video_path)
+    nvdec = _NVDEC_CODECS.get(codec)
+    if nvdec:
+        cmd += ["-hwaccel", "cuda", "-c:v", nvdec]
+        logger.info("Using NVDEC (%s) for video decoding", nvdec)
+    else:
+        logger.info("No NVDEC decoder for codec '%s', using CPU decode", codec)
+
+    cmd += [
+        "-i", video_path,
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-v", "error",
+        "pipe:1",
+    ]
+    return cmd
 if WHAM_PATH not in sys.path:
     sys.path.insert(0, WHAM_PATH)
 
@@ -177,7 +219,6 @@ def run_wham_inference(video_path: str, poses: list[dict],
 
         from lib.models.preproc.backbone.hmr2 import hmr2
         from lib.models.preproc.backbone.utils import process_image
-        import cv2
 
         ckpt = os.path.join(WHAM_PATH, "checkpoints", "hmr2a.ckpt")
         hmr2_model = hmr2(ckpt).to(cfg.DEVICE).eval()
@@ -192,46 +233,53 @@ def run_wham_inference(video_path: str, poses: list[dict],
         init_body_pose = None
         init_betas = None
 
-        cap = cv2.VideoCapture(video_path)
+        # Use ffmpeg pipe with NVDEC GPU decoding instead of cv2.VideoCapture
+        ffmpeg_cmd = _build_ffmpeg_read_cmd(video_path, width, height)
+        frame_size = width * height * 3
+        process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         video_frame_idx = 0
         processed = 0
 
-        while True:
-            ret, img = cap.read()
-            if not ret:
-                break
+        try:
+            while True:
+                raw = process.stdout.read(frame_size)
+                if not raw or len(raw) < frame_size:
+                    break
 
-            if video_frame_idx in frame_id_set:
-                idx = frame_id_to_idx[video_frame_idx]
-                bbox = tr["bbox"][idx]
-                cx, cy, scale = bbox
+                if video_frame_idx in frame_id_set:
+                    img = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+                    idx = frame_id_to_idx[video_frame_idx]
+                    bbox = tr["bbox"][idx]
+                    cx, cy, scale = bbox
 
-                norm_img, _ = process_image(img[..., ::-1], [cx, cy], scale, 256, 256)
-                norm_tensor = torch.from_numpy(norm_img).unsqueeze(0).to(cfg.DEVICE)
+                    # img is BGR from ffmpeg, process_image expects RGB
+                    norm_img, _ = process_image(img[..., ::-1], [cx, cy], scale, 256, 256)
+                    norm_tensor = torch.from_numpy(norm_img).unsqueeze(0).to(cfg.DEVICE)
 
-                with torch.no_grad():
-                    feature = hmr2_model(norm_tensor, encode=True)
-                features.append(feature.cpu())
-                del norm_tensor, feature
-
-                # Get initial pose from first frame
-                if init_global_orient is None:
-                    norm_tensor2 = torch.from_numpy(norm_img).unsqueeze(0).to(cfg.DEVICE)
                     with torch.no_grad():
-                        go, bp, bt, _ = hmr2_model(norm_tensor2, encode=False)
-                    init_global_orient = go.cpu()
-                    init_body_pose = bp.cpu()
-                    init_betas = bt.cpu()
-                    del norm_tensor2, go, bp, bt
+                        feature = hmr2_model(norm_tensor, encode=True)
+                    features.append(feature.cpu())
+                    del norm_tensor, feature
 
-                processed += 1
-                if processed % 50 == 0:
-                    torch.cuda.empty_cache()
-                    logger.info("Feature extraction: %d/%d frames", processed, T)
+                    # Get initial pose from first frame
+                    if init_global_orient is None:
+                        norm_tensor2 = torch.from_numpy(norm_img).unsqueeze(0).to(cfg.DEVICE)
+                        with torch.no_grad():
+                            go, bp, bt, _ = hmr2_model(norm_tensor2, encode=False)
+                        init_global_orient = go.cpu()
+                        init_body_pose = bp.cpu()
+                        init_betas = bt.cpu()
+                        del norm_tensor2, go, bp, bt
 
-            video_frame_idx += 1
+                    processed += 1
+                    if processed % 50 == 0:
+                        torch.cuda.empty_cache()
+                        logger.info("Feature extraction: %d/%d frames", processed, T)
 
-        cap.release()
+                video_frame_idx += 1
+        finally:
+            process.stdout.close()
+            process.wait()
 
         tracking_results[subject_id]["features"] = torch.cat(features) if features else torch.zeros(0)
         tracking_results[subject_id]["init_global_orient"] = init_global_orient
@@ -242,7 +290,7 @@ def run_wham_inference(video_path: str, poses: list[dict],
         _release_gpu()
         logger.info("Stage 1 complete: %d features extracted, extractor released", processed)
 
-        # ---- Stage 2: WHAM network inference (~0.2 GB) ----
+        # ---- Stage 2: WHAM network inference (chunked for long videos) ----
         logger.info("Stage 2: Running WHAM network inference...")
         from lib.models import build_network, build_body_model
         from lib.data.datasets import CustomDataset
@@ -253,71 +301,115 @@ def run_wham_inference(video_path: str, poses: list[dict],
         network = build_network(cfg, smpl)
         network.eval()
 
-        # Build dummy SLAM results (no DPVO — estimate_local_only)
-        total_frames = len(poses)
-        slam_results = np.zeros((total_frames, 7), dtype=np.float32)
-        slam_results[:, 3] = 1.0  # Unit quaternion
+        # Chunk long sequences to avoid SMPL OOM in refine_trajectory.
+        # SMPL LBS processes all frames at once; 300 frames ≈ 130MB vs
+        # 6500 frames ≈ 2.8GB+ which exceeds 12GB VRAM with other tensors.
+        CHUNK_SIZE = 300
+        all_features = tracking_results[subject_id]["features"]
+        all_frame_ids = tracking_results[subject_id]["frame_id"]
+        all_keypoints = tracking_results[subject_id]["keypoints"]
+        all_bboxes = tracking_results[subject_id]["bbox"]
+        n_tracked = len(all_frame_ids)
+        n_chunks = max(1, (n_tracked + CHUNK_SIZE - 1) // CHUNK_SIZE)
 
-        dataset = CustomDataset(cfg, tracking_results, slam_results, width, height, fps)
+        logger.info("Processing %d frames in %d chunk(s) of ≤%d", n_tracked, n_chunks, CHUNK_SIZE)
 
-        with torch.no_grad():
-            batch = dataset.load_data(0)
-            _id, x, inits, feats, mask, init_root, cam_angvel, frame_id, kwargs = batch
-            pred = network(x, inits, feats, mask=mask, init_root=init_root,
-                          cam_angvel=cam_angvel, return_y_up=True, **kwargs)
+        # Accumulate results across chunks
+        all_joints_3d = []
+        all_foot_contacts = []
+        all_world_positions = []
+        all_output_frame_ids = []
 
-        pred_body_pose = matrix_to_axis_angle(pred['poses_body']).cpu().numpy().reshape(-1, 69)
-        pred_root = matrix_to_axis_angle(pred['poses_root_cam']).cpu().numpy().reshape(-1, 3)
-        pred_joints = network.output.joints.cpu() if hasattr(network, 'output') and hasattr(network.output, 'joints') else None
-        foot_contact = pred.get('contact')
+        for chunk_idx in range(n_chunks):
+            c_start = chunk_idx * CHUNK_SIZE
+            c_end = min(c_start + CHUNK_SIZE, n_tracked)
+            chunk_len = c_end - c_start
 
-        del network, smpl, dataset
+            # Build per-chunk tracking_results
+            chunk_tr = {
+                subject_id: {
+                    "frame_id": np.arange(chunk_len),  # re-index from 0
+                    "bbox": all_bboxes[c_start:c_end],
+                    "keypoints": all_keypoints[c_start:c_end],
+                    "features": all_features[c_start:c_end] if isinstance(all_features, torch.Tensor) else all_features,
+                    "flipped_bbox": [],
+                    "flipped_keypoints": [],
+                    "flipped_features": [],
+                    "init_global_orient": tracking_results[subject_id]["init_global_orient"],
+                    "init_body_pose": tracking_results[subject_id]["init_body_pose"],
+                    "init_betas": tracking_results[subject_id]["init_betas"],
+                }
+            }
+
+            # Dummy SLAM for this chunk (no camera motion)
+            chunk_slam = np.zeros((chunk_len, 7), dtype=np.float32)
+            chunk_slam[:, 3] = 1.0
+
+            dataset = CustomDataset(cfg, chunk_tr, chunk_slam, width, height, fps)
+
+            with torch.no_grad():
+                batch = dataset.load_data(0)
+                _id, x, inits, feats, mask, init_root, cam_angvel, frame_id, kwargs = batch
+                pred = network(x, inits, feats, mask=mask, init_root=init_root,
+                              cam_angvel=cam_angvel, return_y_up=True, **kwargs)
+
+            chunk_joints = network.output.joints.cpu() if hasattr(network, 'output') and hasattr(network.output, 'joints') else None
+            chunk_contact = pred.get('contact')
+
+            # network.output.joints is (T, 31, 3) — frame count is shape[0]
+            chunk_n = chunk_joints.shape[0] if chunk_joints is not None else chunk_len
+
+            # Map chunk frame indices back to original tracked indices
+            for t in range(chunk_n):
+                orig_idx = c_start + t
+                if orig_idx >= n_tracked:
+                    break
+                all_output_frame_ids.append(int(all_frame_ids[orig_idx]))
+
+                if chunk_joints is not None:
+                    # joints shape: (T, J, 3) where J=31 (24 SMPL + extra)
+                    j3d = chunk_joints[t].numpy()
+                    all_joints_3d.append(joints_3d_to_list(j3d))
+                    all_world_positions.append({
+                        "x": float(j3d[0, 0]),
+                        "y": float(j3d[0, 1]),
+                        "z": float(j3d[0, 2]),
+                    })
+                else:
+                    all_joints_3d.append(None)
+                    all_world_positions.append(None)
+
+                if chunk_contact is not None:
+                    fc = chunk_contact[0, t].cpu().tolist()
+                    all_foot_contacts.append({
+                        "left_heel": fc[0] if len(fc) > 0 else 0.0,
+                        "left_toe": fc[1] if len(fc) > 1 else 0.0,
+                        "right_heel": fc[2] if len(fc) > 2 else 0.0,
+                        "right_toe": fc[3] if len(fc) > 3 else 0.0,
+                    })
+                else:
+                    all_foot_contacts.append(None)
+
+            # Free chunk tensors
+            del pred, chunk_joints, chunk_contact, dataset
+            torch.cuda.empty_cache()
+
+            logger.info("Chunk %d/%d complete (%d frames)", chunk_idx + 1, n_chunks, chunk_n)
+
+        del network, smpl
         _release_gpu()
         logger.info("Stage 2 complete, network released")
 
         # ---- Build results dict ----
-        frame_ids = tracking_results[0]["frame_id"]
-        n_output = pred_body_pose.shape[0]
-
         results = {
-            "joints_3d": [],
-            "foot_contacts": [],
-            "world_positions": [],
-            "frame_count": n_output,
-            "frame_ids": frame_ids.tolist() if hasattr(frame_ids, 'tolist') else frame_ids,
+            "joints_3d": all_joints_3d,
+            "foot_contacts": all_foot_contacts,
+            "world_positions": all_world_positions,
+            "frame_count": len(all_joints_3d),
+            "frame_ids": all_output_frame_ids,
         }
 
-        for t in range(n_output):
-            if pred_joints is not None:
-                if pred_joints.dim() == 3:
-                    j3d = pred_joints[t].numpy()
-                elif pred_joints.dim() == 4:
-                    j3d = pred_joints[0, t].numpy()
-                else:
-                    j3d = pred_joints[t].numpy()
-                results["joints_3d"].append(joints_3d_to_list(j3d))
-                # World position = pelvis (joint 0)
-                results["world_positions"].append({
-                    "x": float(j3d[0, 0]),
-                    "y": float(j3d[0, 1]),
-                    "z": float(j3d[0, 2]),
-                })
-            else:
-                results["joints_3d"].append(None)
-                results["world_positions"].append(None)
-
-            if foot_contact is not None:
-                fc = foot_contact[0, t].cpu().tolist()
-                results["foot_contacts"].append({
-                    "left_heel": fc[0] if len(fc) > 0 else 0.0,
-                    "left_toe": fc[1] if len(fc) > 1 else 0.0,
-                    "right_heel": fc[2] if len(fc) > 2 else 0.0,
-                    "right_toe": fc[3] if len(fc) > 3 else 0.0,
-                })
-            else:
-                results["foot_contacts"].append(None)
-
-        logger.info("WHAM inference complete: %d frames processed", n_output)
+        logger.info("WHAM inference complete: %d frames processed", results["frame_count"])
         return results
 
     except Exception:
