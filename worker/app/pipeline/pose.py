@@ -427,6 +427,18 @@ def run_pose_estimation_multi(
     """
     from app.pipeline.tracker import SimpleTracker
     from app.pipeline.appearance import extract_appearance
+    from app.pipeline.biometrics import extract_biometric_signature
+    from app.pipeline.pose_config import REID_ENABLED
+
+    reid_extractor = None
+    if REID_ENABLED:
+        try:
+            from app.pipeline.reid import ReIDExtractor
+            reid_extractor = ReIDExtractor()
+            if reid_extractor.session is None:
+                reid_extractor = None
+        except Exception as e:
+            logger.warning(f"Failed to initialize Re-ID extractor: {e}")
 
     model = _init_model()
 
@@ -453,8 +465,15 @@ def run_pose_estimation_multi(
     logger.info(f"Multi-person pose estimation: tracking {len(selected_track_ids)} persons "
                 f"across {total_frames} frames (skip={skip}, scale={w}x{h}, effective={effective_total})")
 
+    STALL_THRESHOLD_MS = 30_000  # abort if no dancer captured for 30s of video time
+    RESEED_WAIT = 180  # frames (~3s at 60fps) without any selected dancer before re-seeding
+    MAX_RESEEDS = 10
+
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     frame_counts: dict[int, int] = {tid: 0 for tid in selected_track_ids}
+    last_capture_ms = 0  # most recent video timestamp where any selected dancer was captured
+    reseed_gap = 0  # consecutive frames with no selected dancer captured
+    reseed_count = 0
     frame_idx = 0
 
     try:
@@ -469,28 +488,60 @@ def run_pose_estimation_multi(
             timestamp_ms = int((frame_idx * skip / fps) * 1000)
             persons = _extract_all_poses(keypoints, scores, w, h)
 
-            if persons:
-                bboxes = [p["bbox"] for p in persons]
+            bboxes = [p["bbox"] for p in persons] if persons else []
 
-                # Extract appearance every 5th output frame (balance speed vs accuracy)
-                hists = None
-                if frame_idx % 5 == 0:
-                    hists = []
-                    for p in persons:
-                        try:
-                            app = extract_appearance(frame, p["bbox"], normalized=True)
-                            hists.append(app.get("color_histogram", []))
-                        except Exception:
-                            hists.append(None)
+            # Extract appearance + identity signals every 5th output frame
+            hists = None
+            bio_sigs = None
+            reid_embs = None
+            if persons and frame_idx % 5 == 0:
+                hists = []
+                bio_sigs = []
+                reid_embs = []
+                for p in persons:
+                    try:
+                        app = extract_appearance(frame, p["bbox"], normalized=True)
+                        hists.append(app.get("color_histogram", []))
+                    except Exception:
+                        hists.append(None)
+                    bio_sigs.append(extract_biometric_signature(p.get("dancer_pose", {})))
+                    if reid_extractor:
+                        reid_embs.append(reid_extractor.extract(frame, p["bbox"], normalized=True))
+                    else:
+                        reid_embs.append(None)
 
-                track_ids = tracker.update(bboxes, histograms=hists)
+            # Always call tracker.update() — even with empty bboxes — so it can
+            # increment missing counts and manage occlusion recovery properly.
+            track_ids = tracker.update(bboxes, histograms=hists,
+                                       biometrics=bio_sigs, embeddings=reid_embs)
 
-                for det_idx, tid in enumerate(track_ids):
-                    if tid in selected_track_ids:
-                        person = persons[det_idx]
-                        person["timestamp_ms"] = timestamp_ms
-                        frame_counts[tid] += 1
-                        yield (tid, person)
+            captured_this_frame = False
+            for det_idx, tid in enumerate(track_ids):
+                if tid in selected_track_ids:
+                    person = persons[det_idx]
+                    person["timestamp_ms"] = timestamp_ms
+                    frame_counts[tid] += 1
+                    captured_this_frame = True
+                    yield (tid, person)
+
+            if captured_this_frame:
+                last_capture_ms = timestamp_ms
+                reseed_gap = 0
+            else:
+                reseed_gap += 1
+                if reseed_gap >= RESEED_WAIT and reseed_count < MAX_RESEEDS and seed_bboxes:
+                    logger.info(f"Frame {frame_idx}: all dancers lost for {reseed_gap} frames, "
+                                f"re-seeding tracker (reseed {reseed_count + 1}/{MAX_RESEEDS})")
+                    tracker.reseed()
+                    reseed_count += 1
+                    reseed_gap = 0
+
+            # Stall detection: if no selected dancer captured for 30s of video,
+            # tracking has been permanently lost — abort early.
+            if frame_idx % 100 == 0 and timestamp_ms - last_capture_ms > STALL_THRESHOLD_MS and last_capture_ms > 0:
+                logger.warning(f"All dancers lost for {(timestamp_ms - last_capture_ms) / 1000:.0f}s "
+                               f"of video time (last capture at {last_capture_ms}ms). Aborting pose estimation.")
+                break
 
             frame_idx += 1
             if progress_callback and frame_idx % 10 == 0:
