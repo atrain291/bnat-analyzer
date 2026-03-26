@@ -40,7 +40,34 @@ The tracker was specifically hardened against walk-through occlusion (someone wa
 | Appearance matching | `appearance_weight=0.3` | HSV histogram similarity blended with IoU; "red top" ≠ "black top" |
 | Group coherence | threshold 0.4 | Tracks pairwise distances between dancers; rejects matches that break formation |
 | Extended memory | `max_missing=90` | Tracks survive 3s invisible with position projected along velocity |
-| Graveyard re-ID | `graveyard_frames=300` | Expired tracks recoverable for 10s via predicted position + size + appearance |
+| Graveyard re-ID | `graveyard_frames=300` | Expired tracks recoverable for 10s via identity scoring |
+| Biometric signatures | 6 body-proportion ratios | Pose-invariant, scale-invariant limb ratios unique per individual |
+| Re-ID CNN embeddings | MobileNetV3-Small 512-dim | Visual identity encoding via ONNX on CUDA, baked into Docker image |
+
+### Identity Recovery System (biometrics.py + reid.py)
+When tracking is lost, dancers are re-identified by *who they are* rather than *where they were*:
+
+**Biometric Signatures** (`biometrics.py`):
+- 6 body-proportion ratios: shoulder/hip width, torso/leg length, upper/lower arm, thigh/shin, head/shoulder, arm/body
+- Extracted from existing 133-keypoint pose data (zero additional inference cost)
+- EMA-smoothed per track, carried through active → graveyard → re-ID lifecycle
+- Discriminates different body types even in matching costumes
+
+**Re-ID CNN Embeddings** (`reid.py`):
+- MobileNetV3-Small backbone producing 512-dim L2-normalized visual embeddings
+- ONNX model baked into Docker image at build time via `export_reid_model.py` (~5MB)
+- Runs on existing onnxruntime-gpu CUDA EP, ~2ms per person crop
+- Captures texture, silhouette, and visual features beyond color histograms
+- Singleton pattern, lazy-loaded on first use
+
+**Identity Scoring** (in `tracker.py`):
+- `_identity_score()` blends: histogram (0.25) + biometric (0.25) + Re-ID (0.30)
+- Weights adapt when signals are unavailable (graceful degradation)
+- Graveyard re-ID: 20% proximity + 80% identity (was 50/50 proximity/appearance)
+- Re-lock: full identity scoring with 3-frame confirmation
+- `reseed()`: identity-based greedy matching instead of reverting to frame-1 positions
+
+**Config**: `REID_ENABLED=true/false` env var to toggle Re-ID CNN (biometrics always on)
 
 ### Appearance System (appearance.py)
 - Extracts from upper 60% of bbox (torso region), trimmed 10% margins
@@ -187,8 +214,10 @@ bharatanatyam-analyzer/
 │   │   │   ├── pose.py             # RTMPose WholeBody 133-pt + NVDEC
 │   │   │   ├── angles.py           # Joint angle computation (2D + 3D)
 │   │   │   ├── scoring.py          # Numeric scoring (0-100, prefers 3D)
-│   │   │   ├── tracker.py          # 6-layer occlusion-robust tracker
+│   │   │   ├── tracker.py          # 8-layer occlusion-robust tracker with identity recovery
 │   │   │   ├── appearance.py       # Color histogram + dominant color extraction
+│   │   │   ├── biometrics.py       # Body-proportion signature extraction + similarity
+│   │   │   ├── reid.py             # Re-ID CNN embeddings (MobileNetV3-Small ONNX)
 │   │   │   ├── llm.py              # Claude API coaching
 │   │   │   ├── beat_detection.py   # Audio onset detection + rhythm scoring
 │   │   │   └── wham.py             # WHAM 3D dispatch client (fire-and-forget)
@@ -231,6 +260,7 @@ bharatanatyam-analyzer/
 | WHAM 3D integration (data model + angles + scoring) | Done |
 | WHAM 3D worker container (separate PyTorch 1.13.1 container) | Done |
 | Occlusion-robust tracking (appearance + velocity + group coherence) | Done |
+| Identity recovery (biometric signatures + Re-ID CNN embeddings) | Done |
 | Video transcode (HEVC→H.264, GPU-accelerated) | Done |
 | WHAM 3D end-to-end test | Not yet tested |
 | WHAM foot contact rhythm (Phase 2b) | Not started |
@@ -239,7 +269,12 @@ bharatanatyam-analyzer/
 | Adavu classification | Not started |
 | Multi-camera 3D reconstruction | Not started |
 
-## Recent Changes (2026-03-23)
+## Recent Changes (2026-03-25)
+- **Identity recovery system**: Dual-layer biometric body-proportion signatures (6 ratios from pose keypoints) + MobileNetV3-Small Re-ID CNN embeddings (512-dim via ONNX on CUDA). Graveyard re-ID now scores 20% proximity + 80% identity. `reseed()` uses identity-based greedy matching instead of reverting to frame-1 positions. Re-lock uses full identity scoring. Re-ID model baked into Docker image at build time.
+- **New files**: `biometrics.py`, `reid.py`, `export_reid_model.py`
+- **Config**: `REID_ENABLED` and `REID_MODEL_PATH` env vars in `pose_config.py`
+
+## Changes (2026-03-23)
 - **Occlusion-robust tracker**: Replaced simple IoU+centroid tracker with 6-layer system (size gating, velocity prediction, appearance matching, group coherence, extended memory, graveyard re-ID)
 - **Appearance extraction**: New `appearance.py` — extracts dominant colors and HSV histograms from torso region per detected person
 - **Dancer selection UI**: Now shows color swatches and descriptions ("red and black top") per detected person
@@ -251,3 +286,6 @@ bharatanatyam-analyzer/
 - Tracker re-ID score threshold is 0.3 — may need tuning if false re-IDs occur
 - Group coherence threshold is 0.4 — dancers who move far apart (stage entrances) may trigger false rejection
 - Frame count per dancer may be low if occlusion is extreme — tracker discards frames it can't confidently assign
+- Re-ID model is MobileNetV3-Small pretrained on ImageNet (not person re-ID). Works for visual feature encoding but could be improved with fine-tuning on person re-ID data (e.g., Market-1501, MSMT17)
+- Biometric ratios are 2D-projected — deep aramandi changes apparent limb ratios. EMA smoothing mitigates this; WHAM 3D joints could provide true 3D biometrics in future
+- `REID_ENABLED=false` disables CNN embeddings (biometric ratios still active)

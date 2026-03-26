@@ -131,6 +131,10 @@ class SimpleTracker:
         self.graveyard_embedding: dict[int, np.ndarray] = {}
         # Reseed pending flag for identity-based reseed
         self._reseed_pending = False
+        # Per-track pose motion state (7-float vector: knee, torso, arms, height, velocity)
+        self.track_motion: dict[int, np.ndarray] = {}
+        # Predicted motion state for missing group members (from visible dancers' average)
+        self._predicted_group_motion: np.ndarray | None = None
         self._frame_counter = 0
 
     def seed(self, known_bboxes: dict[int, tuple], histograms: dict[int, list[float]] | None = None,
@@ -205,9 +209,13 @@ class SimpleTracker:
                     f"for tracks {sorted(self._original_group_ids)}")
 
     def _update_group_distances(self):
-        """Update smoothed pairwise centroid distances between group members."""
+        """Update smoothed pairwise centroid distances between group members.
+
+        Uses a fast EMA (alpha=0.3) so distances adapt quickly to formation changes
+        (e.g., three-abreast → V formation).
+        """
         gids = [tid for tid in self.group_ids if tid in self.active_tracks and self.missing_count.get(tid, 0) == 0]
-        alpha = 0.15
+        alpha = 0.3
         for i, tid_a in enumerate(gids):
             for tid_b in gids[i + 1:]:
                 pair = (min(tid_a, tid_b), max(tid_a, tid_b))
@@ -246,8 +254,10 @@ class SimpleTracker:
             actual_dist = centroid_distance(candidate_bbox, other_bbox)
             # Ratio of actual to expected distance — 1.0 = perfect
             ratio = actual_dist / expected_dist if expected_dist > 0 else 1.0
-            # Penalize deviations > 50% from expected
-            if ratio > 1.5 or ratio < 0.5:
+            # Penalize deviations > 3x from expected — wide tolerance for formation
+            # changes (e.g., three-abreast → V formation, stage entrances/exits).
+            # Previously 1.5x which was too tight for dance choreography.
+            if ratio > 3.0 or ratio < 0.33:
                 penalties.append(abs(1.0 - ratio))
 
         if not penalties:
@@ -386,12 +396,60 @@ class SimpleTracker:
         else:
             self.track_embedding[track_id] = merge_embeddings(prev, emb, alpha)
 
+    def _update_motion(self, track_id: int, motion: np.ndarray | None, alpha: float = 0.3):
+        """Update EMA of pose motion state for a track."""
+        if motion is None:
+            return
+        prev = self.track_motion.get(track_id)
+        if prev is None:
+            self.track_motion[track_id] = motion.copy()
+        else:
+            self.track_motion[track_id] = prev * (1 - alpha) + motion * alpha
+
+    def _update_predicted_group_motion(self):
+        """Compute average motion state from visible group members.
+
+        This becomes the predicted motion state for any occluded group members —
+        in Bharatanatyam, dancers perform synchronized movements, so visible
+        dancers predict what the occluded dancer should be doing.
+        """
+        visible = []
+        for tid in self.group_ids:
+            if (tid in self.track_motion
+                    and self.missing_count.get(tid, 0) == 0
+                    and tid in self.active_tracks):
+                visible.append(self.track_motion[tid])
+        if len(visible) >= 1:
+            self._predicted_group_motion = np.mean(visible, axis=0)
+        else:
+            self._predicted_group_motion = None
+
+    def _motion_coherence(self, det_motion: np.ndarray | None) -> float:
+        """Score how well a detection's motion state matches the group's predicted motion.
+
+        Returns 0.0-1.0 (1.0 = moving exactly like the visible dancers).
+        Returns 0.5 if no prediction available (neutral).
+        """
+        if det_motion is None or self._predicted_group_motion is None:
+            return 0.5
+        # Cosine similarity between motion vectors
+        a = det_motion
+        b = self._predicted_group_motion
+        norm_a = np.linalg.norm(a)
+        norm_b = np.linalg.norm(b)
+        if norm_a < 1e-6 or norm_b < 1e-6:
+            return 0.5
+        cos_sim = float(np.dot(a, b) / (norm_a * norm_b))
+        # Map from [-1, 1] to [0, 1]
+        return (cos_sim + 1.0) / 2.0
+
     def _identity_score(self, det_hist, det_bio, det_emb, track_id: int,
-                        use_graveyard: bool = False) -> float:
-        """Compute blended identity score using histogram + biometric + Re-ID signals.
+                        use_graveyard: bool = False,
+                        det_motion: np.ndarray | None = None) -> float:
+        """Compute blended identity score using histogram + biometric + Re-ID + motion signals.
 
         Weights adapt based on which signals are available.
-        Target weights: proximity-free identity = 0.25 histogram + 0.25 biometric + 0.30 reid
+        Target weights: histogram 0.20, biometric 0.20, Re-ID 0.25, motion 0.15
         (proximity handled by caller).
         """
         scores = {}
@@ -404,10 +462,10 @@ class SimpleTracker:
             track_hist = self.track_histogram.get(track_id)
         if det_hist and track_hist and len(det_hist) == len(track_hist):
             scores["hist"] = float(sum(min(a, b) for a, b in zip(det_hist, track_hist)))
-            weights["hist"] = 0.25
+            weights["hist"] = 0.20
         else:
             scores["hist"] = 0.5
-            weights["hist"] = 0.10
+            weights["hist"] = 0.08
 
         # Biometric
         if use_graveyard:
@@ -417,7 +475,7 @@ class SimpleTracker:
         bio_sim = signature_similarity(det_bio, track_bio)
         if bio_sim != 0.5 or (det_bio is not None and track_bio is not None):
             scores["bio"] = bio_sim
-            weights["bio"] = 0.25
+            weights["bio"] = 0.20
         else:
             scores["bio"] = 0.5
             weights["bio"] = 0.05
@@ -430,10 +488,19 @@ class SimpleTracker:
         reid_sim = reid_cosine_similarity(det_emb, track_emb)
         if reid_sim != 0.5 or (det_emb is not None and track_emb is not None):
             scores["reid"] = reid_sim
-            weights["reid"] = 0.30
+            weights["reid"] = 0.25
         else:
             scores["reid"] = 0.5
             weights["reid"] = 0.05
+
+        # Motion coherence: does this detection move like the visible group members?
+        motion_sim = self._motion_coherence(det_motion)
+        if motion_sim != 0.5 and det_motion is not None and self._predicted_group_motion is not None:
+            scores["motion"] = motion_sim
+            weights["motion"] = 0.15
+        else:
+            scores["motion"] = 0.5
+            weights["motion"] = 0.02
 
         total_w = sum(weights.values())
         if total_w < 1e-6:
@@ -442,7 +509,8 @@ class SimpleTracker:
 
     def update(self, bboxes: list[tuple], histograms: list[list[float]] | None = None,
                biometrics: list[BiometricSignature | None] | None = None,
-               embeddings: list[np.ndarray | None] | None = None) -> list[int]:
+               embeddings: list[np.ndarray | None] | None = None,
+               motions: list[np.ndarray | None] | None = None) -> list[int]:
         """Assign track IDs to a list of bounding boxes for one frame.
 
         Args:
@@ -450,12 +518,14 @@ class SimpleTracker:
             histograms: Optional parallel list of color histograms for appearance matching.
             biometrics: Optional parallel list of BiometricSignature for body-proportion matching.
             embeddings: Optional parallel list of Re-ID embeddings (512-dim) for visual identity matching.
+            motions: Optional parallel list of pose motion state vectors (7-float) for movement correlation.
 
         Returns a list of track_ids parallel to the input bboxes.
         """
         hists = histograms or [None] * len(bboxes)
         bios = biometrics or [None] * len(bboxes)
         embs = embeddings or [None] * len(bboxes)
+        mots = motions or [None] * len(bboxes)
 
         # Identity-based reseed: match detections to graveyarded group members
         if self._reseed_pending and bboxes:
@@ -469,7 +539,8 @@ class SimpleTracker:
                 for di in range(n_det):
                     for gi, g_tid in enumerate(group_graves):
                         identity = self._identity_score(hists[di], bios[di], embs[di],
-                                                        g_tid, use_graveyard=True)
+                                                        g_tid, use_graveyard=True,
+                                                        det_motion=mots[di])
                         # Also factor in size compatibility
                         g_avg = self.graveyard_area.get(g_tid, 0)
                         det_area = _bbox_area(bboxes[di])
@@ -638,14 +709,18 @@ class SimpleTracker:
                 # verify the match doesn't break the group's spatial formation.
                 # This catches cases where an occluder overlaps a dancer's predicted
                 # position but has wrong relative distances to other group members.
+                # Skip if identity signals are strong (trust biometric + Re-ID over formation).
                 if tid in self.group_ids and len(self.group_distances) >= 1:
-                    proposed = {t: bboxes[d] for d, t in enumerate(assignments) if t is not None}
-                    proposed[tid] = bboxes[det_idx]
-                    coherence = self._group_coherence_score(bboxes[det_idx], tid, proposed)
-                    if coherence < 0.4:
-                        # This detection breaks the formation — likely an occluder
-                        logger.debug(f"Rejected match det {det_idx}->track {tid}: coherence={coherence:.2f}")
-                        best_tid_idx = -1
+                    identity = self._identity_score(hists[det_idx], bios[det_idx], embs[det_idx], tid,
+                                                    det_motion=mots[det_idx])
+                    if identity < 0.7:  # Only check coherence when identity is ambiguous
+                        proposed = {t: bboxes[d] for d, t in enumerate(assignments) if t is not None}
+                        proposed[tid] = bboxes[det_idx]
+                        coherence = self._group_coherence_score(bboxes[det_idx], tid, proposed)
+                        if coherence < 0.4:
+                            logger.debug(f"Rejected match det {det_idx}->track {tid}: "
+                                         f"coherence={coherence:.2f}, identity={identity:.2f}")
+                            best_tid_idx = -1
 
             if best_tid_idx >= 0:
                 assignments[det_idx] = track_ids[best_tid_idx]
@@ -694,10 +769,11 @@ class SimpleTracker:
                 dist_limit = self.max_centroid_dist * (4.0 if g_tid in self.group_ids else 2.0)
                 if dist > dist_limit:
                     continue
-                # Score: proximity + identity (histogram + biometric + Re-ID)
+                # Score: proximity + identity (histogram + biometric + Re-ID + motion)
                 prox = max(0, 1.0 - dist / (self.max_centroid_dist * 2.0))
                 identity = self._identity_score(hists[det_idx], bios[det_idx], embs[det_idx],
-                                                g_tid, use_graveyard=True)
+                                                g_tid, use_graveyard=True,
+                                                det_motion=mots[det_idx])
                 score = prox * 0.20 + identity * 0.80
                 if score > best_score:
                     best_score = score
@@ -709,15 +785,20 @@ class SimpleTracker:
 
             if best_grave_tid is not None and best_score > reid_threshold:
                 # Group coherence check: verify re-ID preserves spatial formation
+                # Skip if identity score is strong (trust who they are over where they should be)
                 if best_grave_tid in self.group_ids and len(self.group_distances) >= 1:
-                    proposed = {t: bboxes[d] for d, t in enumerate(assignments) if t is not None}
-                    proposed[best_grave_tid] = bboxes[det_idx]
-                    coherence = self._group_coherence_score(bboxes[det_idx], best_grave_tid, proposed)
-                    if coherence < 0.4:
-                        logger.debug(f"Rejected graveyard re-ID det {det_idx}->track {best_grave_tid}: "
-                                     f"coherence={coherence:.2f}, score={best_score:.2f}")
-                        still_unmatched.append(det_idx)
-                        continue
+                    id_score = self._identity_score(hists[det_idx], bios[det_idx], embs[det_idx],
+                                                    best_grave_tid, use_graveyard=True,
+                                                    det_motion=mots[det_idx])
+                    if id_score < 0.7:
+                        proposed = {t: bboxes[d] for d, t in enumerate(assignments) if t is not None}
+                        proposed[best_grave_tid] = bboxes[det_idx]
+                        coherence = self._group_coherence_score(bboxes[det_idx], best_grave_tid, proposed)
+                        if coherence < 0.4:
+                            logger.debug(f"Rejected graveyard re-ID det {det_idx}->track {best_grave_tid}: "
+                                         f"coherence={coherence:.2f}, identity={id_score:.2f}")
+                            still_unmatched.append(det_idx)
+                            continue
 
                 # 3-frame position-stable confirmation before accepting re-ID
                 det_cx = (bboxes[det_idx][0] + bboxes[det_idx][2]) / 2
@@ -788,7 +869,8 @@ class SimpleTracker:
                     elif g_avg <= 0 or det_area <= 0:
                         continue
                     id_score = self._identity_score(hists[det_idx], bios[det_idx], embs[det_idx],
-                                                    g_tid, use_graveyard=True)
+                                                    g_tid, use_graveyard=True,
+                                                    det_motion=mots[det_idx])
                     if id_score > best_id_score:
                         best_id_score = id_score
                         best_g_tid = g_tid
@@ -855,6 +937,7 @@ class SimpleTracker:
             self._update_histogram(tid, hists[det_idx])
             self._update_biometric(tid, bios[det_idx])
             self._update_embedding(tid, embs[det_idx])
+            self._update_motion(tid, mots[det_idx])
             if old_bbox is not None:
                 self._update_velocity(tid, old_bbox, bboxes[det_idx])
             elif tid not in self.track_velocity:
@@ -905,6 +988,8 @@ class SimpleTracker:
 
         # Update group formation distances (only from visible group members)
         self._update_group_distances()
+        # Update predicted group motion state for occluded dancer re-acquisition
+        self._update_predicted_group_motion()
 
         return assignments
 

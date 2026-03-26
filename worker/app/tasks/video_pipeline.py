@@ -337,6 +337,49 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
             for tid, fd in frame_gen:
                 per_dancer_frames[tid].append(fd)
 
+            # Check per-dancer coverage — warn but proceed with partial results.
+            # Only fail if NO dancer has usable coverage.
+            total_captured = sum(len(f) for f in per_dancer_frames.values())
+            video_duration_ms = metadata.get("duration_ms", 0)
+            if video_duration_ms > 0 and total_captured > 0:
+                total_sec = video_duration_ms / 1000
+                for tid, frames_list in per_dancer_frames.items():
+                    if frames_list:
+                        dancer_max_ms = frames_list[-1].get("timestamp_ms", 0)
+                        dancer_cov = dancer_max_ms / video_duration_ms
+                        if dancer_cov < 0.25:
+                            logger.warning(f"Performance {performance_id}: dancer {tid} only "
+                                           f"tracked to {dancer_max_ms / 1000:.0f}s/{total_sec:.0f}s "
+                                           f"({dancer_cov:.0%} coverage)")
+                # Only fail if the best-tracked dancer has <10% coverage
+                max_dancer_ms = max((f[-1].get("timestamp_ms", 0) for f in per_dancer_frames.values() if f),
+                                    default=0)
+                best_coverage = max_dancer_ms / video_duration_ms if video_duration_ms > 0 else 0
+                if best_coverage < 0.10:
+                    last_sec = max_dancer_ms / 1000
+                    error_msg = (f"Tracking lost all dancers after {last_sec:.0f}s of a {total_sec:.0f}s video. "
+                                 f"Only {total_captured} frames captured ({best_coverage:.0%} coverage). "
+                                 f"The video may have occlusions or camera angles that prevent reliable tracking. "
+                                 f"Try selecting different dancers or using a video with clearer visibility.")
+                    logger.error(f"Performance {performance_id}: {error_msg}")
+                    with get_session() as session:
+                        perf = session.query(Performance).filter(Performance.id == performance_id).first()
+                        if perf:
+                            perf.status = "failed"
+                            perf.error = error_msg
+                    return
+            elif total_captured == 0:
+                error_msg = ("No frames captured for any selected dancer. "
+                             "The tracker could not match any detections to the selected dancers. "
+                             "Try selecting different dancers or using a video with clearer visibility.")
+                logger.error(f"Performance {performance_id}: {error_msg}")
+                with get_session() as session:
+                    perf = session.query(Performance).filter(Performance.id == performance_id).first()
+                    if perf:
+                        perf.status = "failed"
+                        perf.error = error_msg
+                return
+
             # Store frames + compute stats per dancer (single pass each, no recomputation)
             update_progress("pose_analysis", 80.0, message="Computing joint angles and storing frames...")
             dancer_results: dict[int, tuple[int, dict, OnlineAngleAccumulator]] = {}

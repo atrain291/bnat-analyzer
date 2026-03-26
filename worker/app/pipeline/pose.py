@@ -173,6 +173,75 @@ def _extract_single_person_pose(
     }
 
 
+def _extract_motion_state(pose: dict, bbox: tuple, prev_bbox: tuple | None = None) -> np.ndarray | None:
+    """Extract compact 7-float pose motion state for movement correlation.
+
+    Returns [avg_knee_angle, torso_angle, arm_ext_left, arm_ext_right,
+             height_ratio, velocity_x, velocity_y] or None if insufficient data.
+    Angles normalized to 0-1 range (divided by 180).
+    """
+    import math
+
+    def _kp_angle(p1, p2, p3):
+        if any(p.get("confidence", 0) < 0.3 for p in [p1, p2, p3]):
+            return None
+        v1 = (p1["x"] - p2["x"], p1["y"] - p2["y"])
+        v2 = (p3["x"] - p2["x"], p3["y"] - p2["y"])
+        dot = v1[0] * v2[0] + v1[1] * v2[1]
+        m1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2)
+        m2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
+        if m1 < 1e-6 or m2 < 1e-6:
+            return None
+        return math.degrees(math.acos(max(-1, min(1, dot / (m1 * m2)))))
+
+    lk = _kp_angle(pose.get("left_hip", {}), pose.get("left_knee", {}), pose.get("left_ankle", {}))
+    rk = _kp_angle(pose.get("right_hip", {}), pose.get("right_knee", {}), pose.get("right_ankle", {}))
+    avg_knee = ((lk or 0) + (rk or 0)) / max(1, (1 if lk else 0) + (1 if rk else 0))
+    if lk is None and rk is None:
+        return None
+
+    # Torso angle
+    ls = pose.get("left_shoulder", {})
+    rs = pose.get("right_shoulder", {})
+    lh = pose.get("left_hip", {})
+    rh = pose.get("right_hip", {})
+    torso = 0.0
+    if all(p.get("confidence", 0) > 0.3 for p in [ls, rs, lh, rh]):
+        mx = (ls["x"] + rs["x"]) / 2 - (lh["x"] + rh["x"]) / 2
+        my = (ls["y"] + rs["y"]) / 2 - (lh["y"] + rh["y"]) / 2
+        if abs(my) > 1e-6:
+            torso = abs(math.degrees(math.atan2(mx, -my)))
+
+    # Arm extension
+    la = _kp_angle(pose.get("left_shoulder", {}), pose.get("left_elbow", {}), pose.get("left_wrist", {}))
+    ra = _kp_angle(pose.get("right_shoulder", {}), pose.get("right_elbow", {}), pose.get("right_wrist", {}))
+
+    # Height ratio (bbox height vs width — captures crouching vs standing)
+    bw = bbox[2] - bbox[0]
+    bh = bbox[3] - bbox[1]
+    height_ratio = bh / bw if bw > 1e-6 else 1.5
+
+    # Velocity
+    vx, vy = 0.0, 0.0
+    if prev_bbox is not None:
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        pcx = (prev_bbox[0] + prev_bbox[2]) / 2
+        pcy = (prev_bbox[1] + prev_bbox[3]) / 2
+        vx = cx - pcx
+        vy = cy - pcy
+
+    return np.array([
+        avg_knee / 180.0,
+        torso / 180.0,
+        (la or 90) / 180.0,
+        (ra or 90) / 180.0,
+        min(height_ratio / 3.0, 1.0),
+        vx * 10,  # Scale up small velocities for better discrimination
+        vy * 10,
+    ], dtype=np.float32)
+
+
 def _extract_all_poses(
     keypoints: np.ndarray,
     scores: np.ndarray,
@@ -465,16 +534,18 @@ def run_pose_estimation_multi(
     logger.info(f"Multi-person pose estimation: tracking {len(selected_track_ids)} persons "
                 f"across {total_frames} frames (skip={skip}, scale={w}x{h}, effective={effective_total})")
 
-    STALL_THRESHOLD_MS = 30_000  # abort if no dancer captured for 30s of video time
+    STALL_THRESHOLD_MS = 60_000  # abort if ALL dancers lost for 60s of video time
     RESEED_WAIT = 180  # frames (~3s at 60fps) without any selected dancer before re-seeding
     MAX_RESEEDS = 10
 
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     frame_counts: dict[int, int] = {tid: 0 for tid in selected_track_ids}
-    last_capture_ms = 0  # most recent video timestamp where any selected dancer was captured
+    last_capture_ms: dict[int, int] = {tid: 0 for tid in selected_track_ids}  # per-dancer
+    last_any_capture_ms = 0  # most recent video timestamp where any selected dancer was captured
     reseed_gap = 0  # consecutive frames with no selected dancer captured
     reseed_count = 0
     frame_idx = 0
+    prev_bboxes: dict[int, tuple] = {}  # det_idx -> previous bbox for velocity
 
     try:
         while True:
@@ -510,10 +581,22 @@ def run_pose_estimation_multi(
                     else:
                         reid_embs.append(None)
 
+            # Extract motion state every frame (lightweight — just angles + velocity)
+            motion_states = None
+            if persons:
+                motion_states = []
+                for di, p in enumerate(persons):
+                    prev_bb = prev_bboxes.get(di)
+                    motion_states.append(
+                        _extract_motion_state(p.get("dancer_pose", {}), p["bbox"], prev_bb)
+                    )
+                    prev_bboxes[di] = p["bbox"]
+
             # Always call tracker.update() — even with empty bboxes — so it can
             # increment missing counts and manage occlusion recovery properly.
             track_ids = tracker.update(bboxes, histograms=hists,
-                                       biometrics=bio_sigs, embeddings=reid_embs)
+                                       biometrics=bio_sigs, embeddings=reid_embs,
+                                       motions=motion_states)
 
             captured_this_frame = False
             for det_idx, tid in enumerate(track_ids):
@@ -522,10 +605,11 @@ def run_pose_estimation_multi(
                     person["timestamp_ms"] = timestamp_ms
                     frame_counts[tid] += 1
                     captured_this_frame = True
+                    last_capture_ms[tid] = timestamp_ms
                     yield (tid, person)
 
             if captured_this_frame:
-                last_capture_ms = timestamp_ms
+                last_any_capture_ms = timestamp_ms
                 reseed_gap = 0
             else:
                 reseed_gap += 1
@@ -536,12 +620,19 @@ def run_pose_estimation_multi(
                     reseed_count += 1
                     reseed_gap = 0
 
-            # Stall detection: if no selected dancer captured for 30s of video,
-            # tracking has been permanently lost — abort early.
-            if frame_idx % 100 == 0 and timestamp_ms - last_capture_ms > STALL_THRESHOLD_MS and last_capture_ms > 0:
-                logger.warning(f"All dancers lost for {(timestamp_ms - last_capture_ms) / 1000:.0f}s "
-                               f"of video time (last capture at {last_capture_ms}ms). Aborting pose estimation.")
-                break
+            # Stall detection: abort only if ALL dancers have been lost for
+            # STALL_THRESHOLD_MS. Individual dancers being occluded is normal.
+            if frame_idx % 100 == 0 and last_any_capture_ms > 0:
+                all_lost_for = timestamp_ms - last_any_capture_ms
+                if all_lost_for > STALL_THRESHOLD_MS:
+                    # Log per-dancer status for debugging
+                    for tid in selected_track_ids:
+                        gap = (timestamp_ms - last_capture_ms[tid]) / 1000
+                        logger.warning(f"  Track {tid}: last captured {gap:.0f}s ago "
+                                       f"({frame_counts[tid]} total frames)")
+                    logger.warning(f"All dancers lost for {all_lost_for / 1000:.0f}s "
+                                   f"of video time. Aborting pose estimation.")
+                    break
 
             frame_idx += 1
             if progress_callback and frame_idx % 10 == 0:
