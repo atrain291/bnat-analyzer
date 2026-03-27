@@ -5,7 +5,7 @@ from typing import Callable
 import numpy as np
 from rtmlib import Wholebody
 
-from app.pipeline.pose_config import POSE_FRAME_SKIP, POSE_MAX_HEIGHT, POSE_USE_TENSORRT
+from app.pipeline.pose_config import POSE_FRAME_SKIP, POSE_MAX_HEIGHT, POSE_USE_TENSORRT, SAM2_FRAME_SKIP
 
 logger = logging.getLogger(__name__)
 
@@ -651,3 +651,151 @@ def run_pose_estimation_multi(
 
     for tid, count in frame_counts.items():
         logger.info(f"Track {tid}: {count} frames captured")
+
+
+def run_pose_estimation_cropped(
+    video_path: str,
+    metadata: dict,
+    dancer_bboxes: list[dict],
+    start_ms: int = 0,
+    progress_callback: Callable[[int, int], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+):
+    """Yield per-frame pose dicts from RTMPose on pre-cropped dancer regions.
+
+    Args:
+        dancer_bboxes: List of {timestamp_ms, bbox, mask_iou} from tracking_frames.
+            bbox is {x_min, y_min, x_max, y_max} normalized 0-1.
+        start_ms: Video timestamp to start from.
+
+    Yields dicts with dancer_pose, left_hand, right_hand, face, timestamp_ms, bbox.
+    """
+    model = _init_model()
+
+    fps = metadata["fps"]
+    width = metadata["width"]
+    height = metadata["height"]
+    codec = metadata.get("codec", "h264")
+
+    # Build bbox lookup by timestamp
+    bbox_lookup = {b["timestamp_ms"]: b for b in dancer_bboxes}
+    timestamps = sorted(bbox_lookup.keys())
+    total = len(timestamps)
+
+    if total == 0:
+        return
+
+    # Build ffmpeg command with output-mode seeking (frame-accurate)
+    start_sec = start_ms / 1000.0
+    frame_skip = SAM2_FRAME_SKIP
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+
+    nvdec = NVDEC_CODECS.get(codec)
+    if nvdec:
+        cmd += ["-hwaccel", "cuda", "-c:v", nvdec]
+
+    cmd += ["-i", video_path]
+
+    # Output-mode seeking: -ss AFTER -i for frame accuracy
+    if start_ms > 0:
+        cmd += ["-ss", str(start_sec)]
+
+    vf_parts = []
+    if frame_skip > 1:
+        vf_parts.append(f"select='not(mod(n\\,{frame_skip}))'")
+        vf_parts.append("setpts=N/FRAME_RATE/TB")
+    if vf_parts:
+        cmd += ["-vf", ",".join(vf_parts)]
+
+    cmd += ["-f", "rawvideo", "-pix_fmt", "bgr24", "-v", "error", "pipe:1"]
+
+    frame_size = width * height * 3
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    frame_idx = 0
+    BBOX_PAD = 0.25  # 25% padding around bbox
+
+    logger.info(f"Cropped pose estimation: {total} tracking bboxes, "
+                f"start={start_ms}ms, skip={frame_skip}")
+
+    try:
+        while True:
+            raw = process.stdout.read(frame_size)
+            if not raw or len(raw) < frame_size:
+                break
+
+            timestamp_ms = start_ms + int(frame_idx * frame_skip / fps * 1000)
+
+            # Find tracking bbox for this timestamp
+            entry = bbox_lookup.get(timestamp_ms)
+            if entry is None:
+                # Try nearest timestamp within 50ms
+                nearest = min(timestamps, key=lambda t: abs(t - timestamp_ms), default=None)
+                if nearest is not None and abs(nearest - timestamp_ms) < 50:
+                    entry = bbox_lookup[nearest]
+
+            frame_idx += 1
+
+            if entry is None or entry.get("mask_iou", 0) < 0.3:
+                continue
+
+            bbox = entry["bbox"]
+            bw = bbox["x_max"] - bbox["x_min"]
+            bh = bbox["y_max"] - bbox["y_min"]
+            if bw < 0.01 or bh < 0.01:
+                continue
+
+            frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+
+            # Denormalize bbox and add padding
+            pad_x = bw * BBOX_PAD
+            pad_y = bh * BBOX_PAD
+            px1 = max(0, int((bbox["x_min"] - pad_x) * width))
+            py1 = max(0, int((bbox["y_min"] - pad_y) * height))
+            px2 = min(width, int((bbox["x_max"] + pad_x) * width))
+            py2 = min(height, int((bbox["y_max"] + pad_y) * height))
+
+            crop = frame[py1:py2, px1:px2]
+            if crop.size == 0 or crop.shape[0] < 10 or crop.shape[1] < 10:
+                continue
+
+            crop_h, crop_w = crop.shape[:2]
+
+            # Run RTMPose on the crop
+            keypoints, scores = model(crop)
+            if keypoints is None or len(keypoints) == 0:
+                continue
+
+            # Extract single person pose data (normalized to crop dimensions)
+            pose_data = _extract_pose_data(keypoints, scores, crop_w, crop_h)
+
+            # Transform crop-normalized coords to full-frame normalized coords
+            for kp_name, kp in pose_data.get("dancer_pose", {}).items():
+                kp["x"] = kp["x"] * (crop_w / width) + (px1 / width)
+                kp["y"] = kp["y"] * (crop_h / height) + (py1 / height)
+
+            for hand_key in ("left_hand", "right_hand"):
+                for kp_name, kp in pose_data.get(hand_key, {}).items():
+                    kp["x"] = kp["x"] * (crop_w / width) + (px1 / width)
+                    kp["y"] = kp["y"] * (crop_h / height) + (py1 / height)
+
+            for kp in pose_data.get("face", []):
+                kp["x"] = kp["x"] * (crop_w / width) + (px1 / width)
+                kp["y"] = kp["y"] * (crop_h / height) + (py1 / height)
+
+            pose_data["bbox"] = (
+                round(bbox["x_min"], 5), round(bbox["y_min"], 5),
+                round(bbox["x_max"], 5), round(bbox["y_max"], 5),
+            )
+            pose_data["timestamp_ms"] = timestamp_ms
+            yield pose_data
+
+            if progress_callback and frame_idx % 10 == 0:
+                progress_callback(frame_idx, total)
+            if is_cancelled and frame_idx % 10 == 0 and is_cancelled():
+                break
+
+    finally:
+        process.stdout.close()
+        process.wait()
+
+    logger.info(f"Cropped pose estimation complete: {frame_idx} frames processed")

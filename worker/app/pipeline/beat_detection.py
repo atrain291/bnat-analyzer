@@ -14,8 +14,11 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def extract_audio(video_path: str) -> str | None:
+def extract_audio(video_path: str, start_ms: int = 0) -> str | None:
     """Extract audio from video to a temp WAV file.
+
+    Args:
+        start_ms: Start offset in milliseconds (skips audio before this point).
 
     Returns path to temp WAV file, or None if video has no audio.
     """
@@ -24,6 +27,12 @@ def extract_audio(video_path: str) -> str | None:
 
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
+    ]
+
+    if start_ms > 0:
+        cmd += ["-ss", str(start_ms / 1000.0)]
+
+    cmd += [
         "-i", video_path,
         "-vn",
         "-acodec", "pcm_s16le",
@@ -269,12 +278,15 @@ def score_rhythm_sync(
     }
 
 
-def run_beat_analysis(video_path: str, metadata: dict) -> dict | None:
+def run_beat_analysis(video_path: str, metadata: dict, start_ms: int = 0) -> dict | None:
     """Run full audio onset detection pipeline.
+
+    Args:
+        start_ms: Start offset in milliseconds (skips audio before this point).
 
     Returns dict with onset data, or None if no audio available.
     """
-    audio_path = extract_audio(video_path)
+    audio_path = extract_audio(video_path, start_ms=start_ms)
     if not audio_path:
         logger.info("No audio stream, skipping beat analysis")
         return None

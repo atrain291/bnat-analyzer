@@ -8,7 +8,7 @@ from app.celery_app import app
 from app.db import get_session
 from app.models.performance import Performance, PerformanceDancer, DetectedPerson, Frame, Analysis, JointAngleState, BalanceMetrics
 from app.pipeline.ingest import extract_metadata
-from app.pipeline.pose import run_pose_estimation, run_pose_estimation_multi
+from app.pipeline.pose import run_pose_estimation, run_pose_estimation_multi, run_pose_estimation_cropped
 from app.pipeline.pose_config import POSE_FRAME_SKIP
 from app.pipeline.angles import compute_frame_angles, OnlineAngleAccumulator
 from app.pipeline.llm import generate_coaching_feedback
@@ -276,10 +276,14 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
         update_progress("ingest", 7.0, message="Video ready")
         metadata = extract_metadata(video_path)
 
+        # Read start_timestamp_ms for SAM 2 flow (also used for beat detection offset)
+        start_ms = 0
         with get_session() as session:
             perf = session.query(Performance).filter(Performance.id == performance_id).first()
             if perf:
                 perf.duration_ms = metadata["duration_ms"]
+                if perf.start_timestamp_ms:
+                    start_ms = perf.start_timestamp_ms
 
         total_frames = metadata["total_frames"]
         is_cancelled = _make_cancel_checker(performance_id)
@@ -288,7 +292,7 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
         update_progress("beat_detection", 10.0, message="Analyzing audio for beat onsets...")
         beat_data = None
         try:
-            beat_data = run_beat_analysis(video_path, metadata)
+            beat_data = run_beat_analysis(video_path, metadata, start_ms=start_ms)
             if beat_data:
                 with get_session() as session:
                     perf = session.query(Performance).filter(Performance.id == performance_id).first()
@@ -300,42 +304,50 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
             logger.warning(f"Beat detection failed (non-fatal): {e}")
 
         if selected_tracks:
-            # Multi-dancer mode — stream frames through per-dancer accumulators
+            # Multi-dancer mode — use SAM 2 tracking bboxes for cropped pose estimation
             track_id_to_info = {t["track_id"]: t for t in selected_tracks}
             selected_ids = set(track_id_to_info.keys())
 
-            # Fetch detection bboxes and appearance to seed the tracker
-            seed_bboxes = {}
-            seed_histograms = {}
-            with get_session() as session:
-                detected = session.query(DetectedPerson).filter(
-                    DetectedPerson.performance_id == performance_id
-                ).all()
-                for dp in detected:
-                    bbox = dp.bbox
-                    seed_bboxes[dp.track_id] = (bbox["x_min"], bbox["y_min"], bbox["x_max"], bbox["y_max"])
-                    if dp.color_histogram:
-                        seed_histograms[dp.track_id] = dp.color_histogram
+            # Adjust effective duration for the analyzed portion
+            effective_duration_ms = metadata["duration_ms"] - start_ms if start_ms else metadata["duration_ms"]
 
             def pose_progress(current_frame: int, total: int):
                 pct = 20.0 + (current_frame / max(total, 1)) * 60.0
                 update_progress("pose_estimation", pct, frame=current_frame, total_frames=total,
                                 message=f"Estimating poses... frame {current_frame}/{total}")
 
-            effective_total = total_frames // POSE_FRAME_SKIP
-            update_progress("pose_estimation", 20.0, frame=0, total_frames=effective_total,
-                            message="Loading pose model...")
-
-            # Stream (track_id, frame_dict) tuples from the generator, routing
-            # each frame to its dancer's per-dancer list for batch DB storage.
+            # Process each dancer independently using SAM 2 tracking bboxes
             per_dancer_frames: dict[int, list[dict]] = {tid: [] for tid in selected_ids}
-            frame_gen = run_pose_estimation_multi(
-                video_path, metadata, selected_ids, progress_callback=pose_progress,
-                is_cancelled=is_cancelled, seed_bboxes=seed_bboxes,
-                seed_histograms=seed_histograms if seed_histograms else None,
-            )
-            for tid, fd in frame_gen:
-                per_dancer_frames[tid].append(fd)
+
+            from app.models.performance import TrackingFrame
+
+            for track_id in selected_ids:
+                dancer_index = track_id  # track_id == dancer_index in SAM 2 flow
+
+                # Fetch tracking bboxes for this dancer
+                with get_session() as session:
+                    rows = session.query(TrackingFrame).filter(
+                        TrackingFrame.performance_id == performance_id,
+                        TrackingFrame.dancer_index == dancer_index,
+                    ).order_by(TrackingFrame.timestamp_ms).all()
+                    dancer_bboxes = [
+                        {"timestamp_ms": r.timestamp_ms, "bbox": r.bbox, "mask_iou": r.mask_iou}
+                        for r in rows
+                    ]
+
+                if not dancer_bboxes:
+                    logger.warning(f"No tracking data for dancer {dancer_index}")
+                    continue
+
+                update_progress("pose_estimation", 20.0,
+                                message=f"Loading pose model for dancer {track_id}...")
+
+                frame_gen = run_pose_estimation_cropped(
+                    video_path, metadata, dancer_bboxes, start_ms=start_ms,
+                    progress_callback=pose_progress, is_cancelled=is_cancelled,
+                )
+                for fd in frame_gen:
+                    per_dancer_frames[track_id].append(fd)
 
             # Check per-dancer coverage — warn but proceed with partial results.
             # If the user explicitly stopped, skip coverage gate and analyze whatever we have.
