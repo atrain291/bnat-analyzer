@@ -77,6 +77,24 @@ services:
     security_opt:
       - label=disable
 
+  sam2_worker:
+    build: ./sam2_worker
+    volumes:
+      - ./sam2_worker/app:/app/app:z
+      - uploads:/app/uploads
+      - ${HOME}/bharatanatyam-data/sam2:/app/models:z
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    devices:
+      - nvidia.com/gpu=all
+    networks:
+      - bharatanatyam
+    security_opt:
+      - label=disable
+
   postgres:
     image: postgres:16-alpine
     environment:
