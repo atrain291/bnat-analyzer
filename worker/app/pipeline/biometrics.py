@@ -54,6 +54,12 @@ def _safe_ratio(num: float | None, den: float | None) -> float | None:
     return num / den
 
 
+def _avg_optional(a: float | None, b: float | None) -> float | None:
+    if a and b:
+        return (a + b) / 2
+    return a or b
+
+
 def extract_biometric_signature(pose: dict) -> BiometricSignature | None:
     """Extract body-proportion ratios from a pose dict (normalized 0-1 keypoints).
 
@@ -171,6 +177,104 @@ def extract_biometric_signature(pose: dict) -> BiometricSignature | None:
 
     sig.available_count = count
 
+    if count < MIN_RATIOS_REQUIRED:
+        return None
+    return sig
+
+
+def _joint_dist_3d(joints: list, idx_a: int, idx_b: int) -> float | None:
+    if idx_a >= len(joints) or idx_b >= len(joints):
+        return None
+    a, b = joints[idx_a], joints[idx_b]
+    if not a or not b or len(a) < 3 or len(b) < 3:
+        return None
+    d = ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
+    return d if d > 1e-6 else None
+
+
+def _midpoint_3d(joints: list, idx_a: int, idx_b: int) -> list | None:
+    if idx_a >= len(joints) or idx_b >= len(joints):
+        return None
+    a, b = joints[idx_a], joints[idx_b]
+    if not a or not b or len(a) < 3 or len(b) < 3:
+        return None
+    return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2]
+
+
+def extract_biometric_signature_3d(joints_3d: list[list[float]]) -> BiometricSignature | None:
+    """Extract body-proportion ratios from SMPL 24-joint 3D positions.
+
+    Uses true 3D Euclidean distances — pose-invariant unlike 2D projections.
+    SMPL joints: 0=pelvis, 1=L_hip, 2=R_hip, 3=spine1, 4=L_knee, 5=R_knee,
+    6=spine2, 7=L_ankle, 8=R_ankle, 9=spine3, 12=neck, 15=head,
+    16=L_shoulder, 17=R_shoulder, 18=L_elbow, 19=R_elbow, 20=L_wrist, 21=R_wrist.
+
+    Returns None if fewer than MIN_RATIOS_REQUIRED ratios are computable.
+    """
+    if not joints_3d or len(joints_3d) < 22:
+        return None
+
+    shoulder_w = _joint_dist_3d(joints_3d, 16, 17)
+    hip_w = _joint_dist_3d(joints_3d, 1, 2)
+
+    # Torso: midpoint of shoulders to midpoint of hips
+    shoulder_mid = _midpoint_3d(joints_3d, 16, 17)
+    hip_mid = _midpoint_3d(joints_3d, 1, 2)
+    torso_len = None
+    if shoulder_mid and hip_mid:
+        d = ((shoulder_mid[0] - hip_mid[0]) ** 2 +
+             (shoulder_mid[1] - hip_mid[1]) ** 2 +
+             (shoulder_mid[2] - hip_mid[2]) ** 2) ** 0.5
+        torso_len = d if d > 1e-6 else None
+
+    # Legs
+    l_thigh = _joint_dist_3d(joints_3d, 1, 4)
+    r_thigh = _joint_dist_3d(joints_3d, 2, 5)
+    l_shin = _joint_dist_3d(joints_3d, 4, 7)
+    r_shin = _joint_dist_3d(joints_3d, 5, 8)
+    avg_thigh = _avg_optional(l_thigh, r_thigh)
+    avg_shin = _avg_optional(l_shin, r_shin)
+    avg_leg = (avg_thigh + avg_shin) if (avg_thigh and avg_shin) else None
+
+    # Arms
+    l_upper = _joint_dist_3d(joints_3d, 16, 18)
+    r_upper = _joint_dist_3d(joints_3d, 17, 19)
+    l_lower = _joint_dist_3d(joints_3d, 18, 20)
+    r_lower = _joint_dist_3d(joints_3d, 19, 21)
+    avg_upper_arm = _avg_optional(l_upper, r_upper)
+    avg_lower_arm = _avg_optional(l_lower, r_lower)
+
+    # Head: head-to-neck distance (SMPL has no ear joints)
+    head_neck = _joint_dist_3d(joints_3d, 15, 12)
+
+    # Full arm length
+    l_arm = (l_upper + l_lower) if (l_upper and l_lower) else None
+    r_arm = (r_upper + r_lower) if (r_upper and r_lower) else None
+    avg_arm_len = _avg_optional(l_arm, r_arm)
+
+    sig = BiometricSignature()
+    count = 0
+
+    sig.shoulder_hip_ratio = _safe_ratio(shoulder_w, hip_w)
+    if sig.shoulder_hip_ratio is not None:
+        count += 1
+    sig.torso_leg_ratio = _safe_ratio(torso_len, avg_leg)
+    if sig.torso_leg_ratio is not None:
+        count += 1
+    sig.upper_lower_arm_ratio = _safe_ratio(avg_upper_arm, avg_lower_arm)
+    if sig.upper_lower_arm_ratio is not None:
+        count += 1
+    sig.thigh_shin_ratio = _safe_ratio(avg_thigh, avg_shin)
+    if sig.thigh_shin_ratio is not None:
+        count += 1
+    sig.head_shoulder_ratio = _safe_ratio(head_neck, shoulder_w)
+    if sig.head_shoulder_ratio is not None:
+        count += 1
+    sig.arm_body_ratio = _safe_ratio(avg_arm_len, torso_len)
+    if sig.arm_body_ratio is not None:
+        count += 1
+
+    sig.available_count = count
     if count < MIN_RATIOS_REQUIRED:
         return None
     return sig

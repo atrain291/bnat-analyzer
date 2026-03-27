@@ -9,6 +9,12 @@ from app.pipeline.biometrics import (
     BiometricSignature, extract_biometric_signature, merge_signatures, signature_similarity,
 )
 from app.pipeline.reid import cosine_similarity as reid_cosine_similarity, merge_embeddings
+from app.pipeline.pose_config import (
+    TRACKER_RESEED_IDENTITY_THRESHOLD,
+    TRACKER_COHERENCE_THRESHOLD,
+    TRACKER_FORMATION_RATIO_LIMIT,
+    TRACKER_REID_BASE_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +102,10 @@ class SimpleTracker:
         self.velocity_smoothing = velocity_smoothing
         self.effective_fps = effective_fps
         self.relock_min_wait = int(relock_min_wait * fps_scale)
+        self.reseed_identity_threshold = TRACKER_RESEED_IDENTITY_THRESHOLD
+        self.coherence_threshold = TRACKER_COHERENCE_THRESHOLD
+        self.formation_ratio_limit = TRACKER_FORMATION_RATIO_LIMIT
+        self.reid_base_threshold = TRACKER_REID_BASE_THRESHOLD
         self.next_id = 0
         self.active_tracks: dict[int, tuple] = {}  # track_id -> last bbox (may be predicted)
         self.missing_count: dict[int, int] = {}  # track_id -> frames since last seen
@@ -258,7 +268,7 @@ class SimpleTracker:
             # Penalize deviations > 3x from expected — wide tolerance for formation
             # changes (e.g., three-abreast → V formation, stage entrances/exits).
             # Previously 1.5x which was too tight for dance choreography.
-            if ratio > 3.0 or ratio < 0.33:
+            if ratio > self.formation_ratio_limit or ratio < 1.0 / self.formation_ratio_limit:
                 penalties.append(abs(1.0 - ratio))
 
         if not penalties:
@@ -568,7 +578,7 @@ class SimpleTracker:
                 for score, di, gi in flat_scores:
                     if di in assigned_dets or gi in assigned_graves:
                         continue
-                    if score < 0.4:
+                    if score < self.reseed_identity_threshold:
                         break
                     g_tid = group_graves[gi]
                     reseed_assignments[di] = g_tid
@@ -809,7 +819,7 @@ class SimpleTracker:
                         proposed = {t: bboxes[d] for d, t in enumerate(assignments) if t is not None}
                         proposed[tid] = bboxes[det_idx]
                         coherence = self._group_coherence_score(bboxes[det_idx], tid, proposed)
-                        if coherence < 0.4:
+                        if coherence < self.coherence_threshold:
                             logger.debug(f"Rejected match det {det_idx}->track {tid}: "
                                          f"coherence={coherence:.2f}, identity={identity:.2f}")
                             best_tid_idx = -1
@@ -873,7 +883,7 @@ class SimpleTracker:
 
             # Progressive threshold: penalize tracks with prior failed re-IDs
             fail_count = self.reid_fail_count.get(best_grave_tid, 0) if best_grave_tid is not None else 0
-            reid_threshold = min(0.5 + 0.1 * fail_count, 0.8)
+            reid_threshold = min(self.reid_base_threshold + 0.1 * fail_count, 0.8)
 
             if best_grave_tid is not None and best_score > reid_threshold:
                 # Group coherence check: verify re-ID preserves spatial formation
@@ -886,7 +896,7 @@ class SimpleTracker:
                         proposed = {t: bboxes[d] for d, t in enumerate(assignments) if t is not None}
                         proposed[best_grave_tid] = bboxes[det_idx]
                         coherence = self._group_coherence_score(bboxes[det_idx], best_grave_tid, proposed)
-                        if coherence < 0.4:
+                        if coherence < self.coherence_threshold:
                             logger.debug(f"Rejected graveyard re-ID det {det_idx}->track {best_grave_tid}: "
                                          f"coherence={coherence:.2f}, identity={id_score:.2f}")
                             still_unmatched.append(det_idx)
