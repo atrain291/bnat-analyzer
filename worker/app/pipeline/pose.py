@@ -561,11 +561,15 @@ def run_pose_estimation_multi(
 
             bboxes = [p["bbox"] for p in persons] if persons else []
 
-            # Extract appearance + identity signals every 5th output frame
+            # Extract appearance + identity signals every 5th output frame,
+            # or every frame when dancers are being lost (reseed pending/gap growing)
+            need_identity = (frame_idx % 5 == 0
+                             or tracker._reseed_pending
+                             or reseed_gap > 0)
             hists = None
             bio_sigs = None
             reid_embs = None
-            if persons and frame_idx % 5 == 0:
+            if persons and need_identity:
                 hists = []
                 bio_sigs = []
                 reid_embs = []

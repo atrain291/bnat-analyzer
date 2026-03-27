@@ -168,6 +168,7 @@ class SimpleTracker:
         # Initialize pairwise distances for the group
         self._update_group_distances()
         self.next_id = max(known_bboxes.keys()) + 1 if known_bboxes else 0
+        self._first_update_after_seed = True
 
     def reseed(self):
         """Set reseed-pending flag for identity-based re-matching on the next update().
@@ -531,6 +532,9 @@ class SimpleTracker:
         if self._reseed_pending and bboxes:
             self._reseed_pending = False
             group_graves = [g_tid for g_tid in self.graveyard if g_tid in self._original_group_ids]
+            logger.info(f"Reseed executing: {len(group_graves)} group members in graveyard, "
+                        f"{len(self.graveyard)} total graveyard, {len(self.active_tracks)} active, "
+                        f"{len(bboxes)} detections")
             if group_graves:
                 # Build cost matrix: score each detection against each graveyarded group member
                 n_det = len(bboxes)
@@ -594,18 +598,55 @@ class SimpleTracker:
                     logger.info(f"Reseed identity-matched detection {di} -> track {g_tid} "
                                 f"(score={score_matrix[di, list(group_graves).index(g_tid)]:.3f})")
 
+                if not reseed_assignments:
+                    # Fallback: assign by proximity to original seed positions
+                    logger.warning("Identity-based reseed found no identity matches, "
+                                   "falling back to proximity-based assignment")
+                    for g_tid in group_graves:
+                        orig_bbox = self._original_bboxes.get(g_tid)
+                        if orig_bbox is None:
+                            continue
+                        best_di = -1
+                        best_dist = 999.0
+                        for di in range(n_det):
+                            if di in assigned_dets:
+                                continue
+                            d = centroid_distance(bboxes[di], orig_bbox)
+                            if d < best_dist:
+                                best_dist = d
+                                best_di = di
+                        if best_di >= 0:
+                            reseed_assignments[best_di] = g_tid
+                            assigned_dets.add(best_di)
+                            assigned_graves.add(list(group_graves).index(g_tid))
+                            # Recover from graveyard
+                            self.active_tracks[g_tid] = bboxes[best_di]
+                            self.missing_count[g_tid] = 0
+                            self.last_seen_bbox[g_tid] = bboxes[best_di]
+                            self._update_avg_area(g_tid, bboxes[best_di])
+                            self.track_velocity[g_tid] = (0.0, 0.0)
+                            if g_tid in self.graveyard_histogram:
+                                self.track_histogram[g_tid] = self.graveyard_histogram.pop(g_tid)
+                            if g_tid in self.graveyard_biometric:
+                                self.track_biometric[g_tid] = self.graveyard_biometric.pop(g_tid)
+                            if g_tid in self.graveyard_embedding:
+                                self.track_embedding[g_tid] = self.graveyard_embedding.pop(g_tid)
+                            self.graveyard.pop(g_tid, None)
+                            self.graveyard_area.pop(g_tid, None)
+                            self.graveyard_age.pop(g_tid, None)
+                            self.graveyard_velocity.pop(g_tid, None)
+                            self._update_histogram(g_tid, hists[best_di])
+                            self._update_biometric(g_tid, bios[best_di])
+                            self._update_embedding(g_tid, embs[best_di])
+                            logger.info(f"Reseed proximity-matched detection {best_di} -> track {g_tid} "
+                                        f"(dist={best_dist:.3f})")
+
                 if reseed_assignments:
                     self.group_ids = set(self._original_group_ids)
                     self._update_group_distances()
-                    # Return early with assignments if all detections matched
                     if len(reseed_assignments) == n_det:
                         self._frame_counter += 1
                         return [reseed_assignments.get(i, -1) for i in range(n_det)]
-                    # Otherwise fall through with unmatched detections handled normally
-
-                if not reseed_assignments:
-                    # Fallback: no identity signals available, use widened distance
-                    logger.warning("Identity-based reseed found no matches, falling back to distance-based matching")
 
         if not self.active_tracks:
             # First frame (or all tracks expired): assign new IDs
@@ -635,11 +676,13 @@ class SimpleTracker:
                 else:
                     seen = self.last_seen_bbox.get(tid, self.active_tracks[tid])
                     self._move_to_graveyard(tid, seen)
-            # Age out graveyard entries
+            # Age out graveyard entries (group members never expire)
             expired_graves = []
             for g_tid in self.graveyard:
                 self.graveyard_age[g_tid] = self.graveyard_age.get(g_tid, 0) + 1
                 if self.graveyard_age[g_tid] > self.graveyard_frames:
+                    if g_tid in self.group_ids:
+                        continue
                     expired_graves.append(g_tid)
             for g_tid in expired_graves:
                 self._clear_graveyard_entry(g_tid)
@@ -660,48 +703,97 @@ class SimpleTracker:
         used_tracks = set()
         assignments = [None] * len(bboxes)
 
-        # Sort detections by area (largest first for priority)
+        # First frame after seed: use centroid+appearance matching for group tracks
+        # since seed bboxes may be stale (from detection pass, different frames)
+        if getattr(self, '_first_update_after_seed', False):
+            self._first_update_after_seed = False
+            group_tids = [(tidx, tid) for tidx, tid in enumerate(track_ids)
+                          if tid in self.group_ids]
+            det_order_seed = sorted(range(len(bboxes)), key=lambda i: -_bbox_area(bboxes[i]))
+
+            for tidx, tid in group_tids:
+                best_score = -1
+                best_det = -1
+                seed_bbox = track_bboxes[tidx]
+                for di in det_order_seed:
+                    if assignments[di] is not None:
+                        continue
+                    if not self._size_compatible(bboxes[di], tid):
+                        continue
+                    dist = centroid_distance(bboxes[di], seed_bbox)
+                    if dist > self.max_centroid_dist * 2.0:
+                        continue
+                    prox = max(0, 1.0 - dist / (self.max_centroid_dist * 2.0))
+                    app_sim = self._appearance_similarity(hists[di], tid)
+                    score = prox * 0.4 + app_sim * 0.6
+                    if score > best_score:
+                        best_score = score
+                        best_det = di
+
+                if best_det >= 0 and best_score > 0.2:
+                    assignments[best_det] = tid
+                    used_tracks.add(tid)
+                    logger.info(f"Seed-match: detection {best_det} -> track {tid} "
+                                f"(score={best_score:.3f})")
+
+        # Match detections to tracks in two passes:
+        # Pass 1: group tracks get priority (selected dancers should not lose to transients)
+        # Pass 2: non-group tracks get remaining detections
         det_order = sorted(range(len(bboxes)), key=lambda i: -_bbox_area(bboxes[i]))
 
-        for det_idx in det_order:
-            best_score = -1
-            best_tid_idx = -1
+        for priority_pass in (True, False):
+            for det_idx in det_order:
+                if assignments[det_idx] is not None:
+                    continue
+                best_score = -1
+                best_tid_idx = -1
 
-            for tid_idx, tid in enumerate(track_ids):
-                if tid in used_tracks:
-                    continue
-                if not self._size_compatible(bboxes[det_idx], tid):
-                    continue
-                iou = compute_iou(bboxes[det_idx], track_bboxes[tid_idx])
-                if iou < self.iou_threshold:
-                    continue
-                # Blend IoU with appearance similarity
-                app_sim = self._appearance_similarity(hists[det_idx], tid)
-                w = self.appearance_weight
-                score = iou * (1 - w) + app_sim * w
-                if score > best_score:
-                    best_score = score
-                    best_tid_idx = tid_idx
-
-            # Fallback to centroid distance (against predicted position)
-            if best_tid_idx == -1:
-                best_dist = self._effective_centroid_dist()
-                best_app = -1
                 for tid_idx, tid in enumerate(track_ids):
                     if tid in used_tracks:
                         continue
+                    # Pass 1: only consider group tracks; Pass 2: only non-group
+                    is_group = tid in self.group_ids
+                    if priority_pass and not is_group:
+                        continue
+                    if not priority_pass and is_group:
+                        continue
                     if not self._size_compatible(bboxes[det_idx], tid):
                         continue
-                    dist = centroid_distance(bboxes[det_idx], track_bboxes[tid_idx])
-                    if dist < best_dist:
-                        best_dist = dist
+                    iou = compute_iou(bboxes[det_idx], track_bboxes[tid_idx])
+                    if iou < self.iou_threshold:
+                        continue
+                    # Blend IoU with appearance similarity
+                    app_sim = self._appearance_similarity(hists[det_idx], tid)
+                    w = self.appearance_weight
+                    score = iou * (1 - w) + app_sim * w
+                    if score > best_score:
+                        best_score = score
                         best_tid_idx = tid_idx
-                    elif dist == best_dist and best_tid_idx >= 0:
-                        # Tie-break by appearance
-                        app = self._appearance_similarity(hists[det_idx], tid)
-                        if app > best_app:
-                            best_app = app
+
+                # Fallback to centroid distance (against predicted position)
+                if best_tid_idx == -1:
+                    best_dist = self._effective_centroid_dist()
+                    best_app = -1
+                    for tid_idx, tid in enumerate(track_ids):
+                        if tid in used_tracks:
+                            continue
+                        is_group = tid in self.group_ids
+                        if priority_pass and not is_group:
+                            continue
+                        if not priority_pass and is_group:
+                            continue
+                        if not self._size_compatible(bboxes[det_idx], tid):
+                            continue
+                        dist = centroid_distance(bboxes[det_idx], track_bboxes[tid_idx])
+                        if dist < best_dist:
+                            best_dist = dist
                             best_tid_idx = tid_idx
+                        elif dist == best_dist and best_tid_idx >= 0:
+                            # Tie-break by appearance
+                            app = self._appearance_similarity(hists[det_idx], tid)
+                            if app > best_app:
+                                best_app = app
+                                best_tid_idx = tid_idx
 
             if best_tid_idx >= 0:
                 tid = track_ids[best_tid_idx]
@@ -943,6 +1035,17 @@ class SimpleTracker:
             elif tid not in self.track_velocity:
                 self.track_velocity[tid] = (0.0, 0.0)
 
+        # Diagnostic: log when group tracks go unmatched
+        unmatched_group = [tid for tid in unmatched_tids if tid in self.group_ids]
+        if unmatched_group and self._frame_counter % 60 == 0:
+            for tid in unmatched_group:
+                pred = self._predicted_bbox(tid)
+                miss = self.missing_count.get(tid, 0)
+                nearest = min((centroid_distance(b, pred) for b in bboxes), default=999) if bboxes else 999
+                logger.info(f"Frame {self._frame_counter}: GROUP TRACK {tid} unmatched "
+                            f"(missing={miss}, pred_pos={_bbox_centroid(pred)}, "
+                            f"nearest_det={nearest:.3f}, n_dets={len(bboxes)})")
+
         # Keep unmatched tracks alive using predicted position
         for tid in unmatched_tids:
             age = self.missing_count.get(tid, 0) + 1
@@ -958,11 +1061,13 @@ class SimpleTracker:
                 seen = self.last_seen_bbox.get(tid, self.active_tracks[tid])
                 self._move_to_graveyard(tid, seen)
 
-        # Age out graveyard entries
+        # Age out graveyard entries (group members never expire)
         expired_graves = []
         for g_tid in self.graveyard:
             self.graveyard_age[g_tid] = self.graveyard_age.get(g_tid, 0) + 1
             if self.graveyard_age[g_tid] > self.graveyard_frames:
+                if g_tid in self.group_ids:
+                    continue
                 expired_graves.append(g_tid)
         for g_tid in expired_graves:
             self._clear_graveyard_entry(g_tid)
