@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import String, Integer, Float, DateTime, JSON, ForeignKey
+from sqlalchemy import String, Integer, Float, DateTime, JSON, ForeignKey, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -43,6 +43,8 @@ class Performance(Base):
     task_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     error: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     pipeline_progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    start_timestamp_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    click_prompts: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Audio / rhythm
@@ -76,6 +78,21 @@ class DetectedPerson(Base):
     color_histogram: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     performance: Mapped["Performance"] = relationship(back_populates="detected_persons")
+
+
+class TrackingFrame(Base):
+    __tablename__ = "tracking_frames"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"), index=True)
+    dancer_index: Mapped[int] = mapped_column(Integer)
+    timestamp_ms: Mapped[int] = mapped_column(Integer)
+    bbox: Mapped[dict] = mapped_column(JSON)
+    mask_iou: Mapped[float] = mapped_column(Float)
+
+    __table_args__ = (
+        Index("ix_tracking_frames_perf_dancer_ts", "performance_id", "dancer_index", "timestamp_ms"),
+    )
 
 
 class PerformanceDancer(Base):
