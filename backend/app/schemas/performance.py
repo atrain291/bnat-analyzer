@@ -123,6 +123,17 @@ class DancerSelectionRequest(BaseModel):
     selections: list[DancerSelectionItem]
 
 
+class ClickPrompt(BaseModel):
+    x: float
+    y: float
+    label: str | None = None
+
+
+class SelectFrameRequest(BaseModel):
+    start_timestamp_ms: int
+    prompts: list[ClickPrompt]
+
+
 class UploadResponse(BaseModel):
     performance_id: int
     task_id: str

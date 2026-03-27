@@ -14,6 +14,7 @@ from app.schemas.performance import (
     TimelineFrameResponse,
     DetectedPersonResponse,
     DancerSelectionRequest,
+    SelectFrameRequest,
 )
 
 router = APIRouter(prefix="/api/performances", tags=["performances"])
@@ -215,7 +216,7 @@ def stop_performance(performance_id: int, db: Session = Depends(get_db)):
     performance = db.query(Performance).filter(Performance.id == performance_id).first()
     if not performance:
         raise HTTPException(status_code=404, detail="Performance not found")
-    if performance.status not in ("queued", "processing", "detecting"):
+    if performance.status not in ("queued", "processing", "detecting", "tracking", "transcoding"):
         raise HTTPException(status_code=400, detail=f"Performance is not processing (status: {performance.status})")
 
     # Set cancellation flag in Redis so the worker stops pose estimation early
@@ -228,6 +229,81 @@ def stop_performance(performance_id: int, db: Session = Depends(get_db)):
     db.commit()
 
     return {"status": "stopping", "message": "Stopping pose estimation, analysis will run on collected frames"}
+
+
+@router.post("/{performance_id}/select-frame")
+def select_frame(performance_id: int, body: SelectFrameRequest, db: Session = Depends(get_db)):
+    performance = db.query(Performance).filter(Performance.id == performance_id).first()
+    if not performance:
+        raise HTTPException(status_code=404, detail="Performance not found")
+    if performance.status != "uploaded":
+        raise HTTPException(status_code=400, detail=f"Performance not ready (status: {performance.status})")
+    if not body.prompts:
+        raise HTTPException(status_code=400, detail="At least one dancer must be selected")
+
+    performance.start_timestamp_ms = body.start_timestamp_ms
+    performance.click_prompts = [p.model_dump() for p in body.prompts]
+
+    selected_tracks = []
+    for i, prompt in enumerate(body.prompts):
+        pd = PerformanceDancer(
+            performance_id=performance_id,
+            track_id=i,
+            label=prompt.label,
+        )
+        db.add(pd)
+        db.flush()
+        selected_tracks.append({
+            "track_id": i,
+            "performance_dancer_id": pd.id,
+            "label": prompt.label,
+        })
+
+    # Commit DB FIRST, then dispatch (prevents race if dispatch fails)
+    performance.status = "tracking"
+    db.commit()
+
+    video_path = f"/app/uploads/{performance.video_key}"
+    from app.tasks import dispatch_sam2
+    dispatch_sam2(performance_id, video_path, body.start_timestamp_ms,
+                  [p.model_dump() for p in body.prompts], selected_tracks)
+
+    return {"status": "tracking", "dancers_selected": len(body.prompts)}
+
+
+@router.post("/{performance_id}/reset-tracking")
+def reset_tracking(performance_id: int, db: Session = Depends(get_db)):
+    performance = db.query(Performance).filter(Performance.id == performance_id).first()
+    if not performance:
+        raise HTTPException(status_code=404, detail="Performance not found")
+    if performance.status not in ("uploaded", "tracking", "failed"):
+        raise HTTPException(status_code=400, detail=f"Cannot reset (status: {performance.status})")
+
+    if performance.status == "tracking":
+        import redis as r
+        import os
+        redis_client = r.from_url(os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0"))
+        redis_client.set(f"cancel:{performance_id}", "1", ex=300)
+
+    # Delete all related data
+    from app.models.performance import TrackingFrame
+    from app.models.analysis import Frame, JointAngleState, BalanceMetrics
+    frame_ids = [f.id for f in db.query(Frame.id).filter(Frame.performance_id == performance_id).all()]
+    if frame_ids:
+        db.query(JointAngleState).filter(JointAngleState.frame_id.in_(frame_ids)).delete(synchronize_session=False)
+        db.query(BalanceMetrics).filter(BalanceMetrics.frame_id.in_(frame_ids)).delete(synchronize_session=False)
+    db.query(Frame).filter(Frame.performance_id == performance_id).delete()
+    db.query(Analysis).filter(Analysis.performance_id == performance_id).delete()
+    db.query(TrackingFrame).filter(TrackingFrame.performance_id == performance_id).delete()
+    db.query(PerformanceDancer).filter(PerformanceDancer.performance_id == performance_id).delete()
+
+    performance.start_timestamp_ms = None
+    performance.click_prompts = None
+    performance.status = "uploaded"
+    performance.error = None
+    db.commit()
+
+    return {"status": "uploaded"}
 
 
 @router.delete("/{performance_id}")

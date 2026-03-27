@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.dancer import Dancer
 from app.models.performance import Performance
-from app.tasks import dispatch_detection
+from app.tasks import dispatch_transcode
 from app.schemas.performance import UploadResponse
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
@@ -56,19 +56,19 @@ async def upload_video(
         ragam=ragam,
         video_url=f"/uploads/{video_key}",
         video_key=video_key,
-        status="queued",
+        status="transcoding",
     )
     db.add(performance)
     db.commit()
     db.refresh(performance)
 
-    # Dispatch detection pass (user selects dancers before full pipeline)
-    task_id = dispatch_detection(performance.id, video_path)
+    # Dispatch transcode task (video must be browser-playable before frame selection)
+    task_id = dispatch_transcode(performance.id, video_path)
     performance.task_id = task_id
     db.commit()
 
     return UploadResponse(
         performance_id=performance.id,
         task_id=task_id,
-        status="queued",
+        status="transcoding",
     )

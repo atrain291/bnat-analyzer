@@ -16,6 +16,8 @@ celery_app.conf.update(
     task_routes={
         "worker.app.tasks.video_pipeline.run_pipeline": {"queue": "video_pipeline"},
         "worker.app.tasks.detect_dancers.run_detection": {"queue": "video_pipeline"},
+        "worker.app.tasks.transcode.run_transcode": {"queue": "video_pipeline"},
+        "sam2_worker.app.tasks.run_sam2_tracking": {"queue": "sam2_tracking"},
     },
 )
 
@@ -35,5 +37,24 @@ def dispatch_pipeline(performance_id: int, video_path: str, selected_tracks: lis
         args=[performance_id, video_path],
         kwargs={"selected_tracks": selected_tracks},
         queue="video_pipeline",
+    )
+    return result.id
+
+
+def dispatch_transcode(performance_id: int, video_path: str) -> str:
+    result = celery_app.send_task(
+        "worker.app.tasks.transcode.run_transcode",
+        args=[performance_id, video_path],
+        queue="video_pipeline",
+    )
+    return result.id
+
+
+def dispatch_sam2(performance_id: int, video_path: str, start_timestamp_ms: int,
+                  click_prompts: list, selected_tracks: list) -> str:
+    result = celery_app.send_task(
+        "sam2_worker.app.tasks.run_sam2_tracking",
+        args=[performance_id, video_path, start_timestamp_ms, click_prompts, selected_tracks],
+        queue="sam2_tracking",
     )
     return result.id
