@@ -4,13 +4,13 @@ import { Loader2, CheckCircle2, XCircle } from "lucide-react";
 import { getPerformanceStatus, deletePerformance, stopPerformance, PipelineProgress } from "../api/performances";
 
 const STAGES = [
+  { key: "tracking", label: "Tracking Dancers", weight: 30 },
   { key: "ingest", label: "Ingest Video", weight: 3 },
   { key: "beat_detection", label: "Beat Detection", weight: 4 },
-  { key: "detection", label: "Detecting Dancers", weight: 7 },
-  { key: "pose_estimation", label: "Pose Estimation", weight: 50 },
+  { key: "pose_estimation", label: "Pose Estimation", weight: 35 },
   { key: "pose_analysis", label: "Pose Analysis", weight: 5 },
-  { key: "llm_synthesis", label: "AI Coaching", weight: 15 },
-  { key: "scoring", label: "Scoring", weight: 6 },
+  { key: "llm_synthesis", label: "AI Coaching", weight: 10 },
+  { key: "scoring", label: "Scoring", weight: 3 },
   { key: "complete", label: "Complete", weight: 10 },
 ];
 
@@ -45,9 +45,9 @@ export default function ProcessingStatus() {
           if (intervalRef.current) clearInterval(intervalRef.current);
           setTimeout(() => navigate(`/review/${performanceId}`), 1500);
         }
-        if (data.status === "awaiting_selection") {
+        if (data.status === "uploaded") {
           if (intervalRef.current) clearInterval(intervalRef.current);
-          setTimeout(() => navigate(`/select-dancers/${performanceId}`), 500);
+          setTimeout(() => navigate(`/select-frame/${performanceId}`), 500);
         }
         if (data.status === "failed") {
           if (intervalRef.current) clearInterval(intervalRef.current);
@@ -102,12 +102,12 @@ export default function ProcessingStatus() {
         <p className="mt-1 text-gray-400">
           {status === "complete"
             ? "Analysis complete! Redirecting..."
-            : status === "awaiting_selection"
-            ? "Dancers detected! Redirecting to selection..."
+            : status === "uploaded"
+            ? "Redirecting to dancer selection..."
             : status === "failed"
             ? "Processing failed"
-            : status === "detecting"
-            ? "Scanning video for dancers..."
+            : status === "tracking"
+            ? "Tracking dancers through the video..."
             : stopping
             ? "Wrapping up with collected frames..."
             : "Analyzing your Bharatanatyam performance..."}
@@ -204,7 +204,7 @@ export default function ProcessingStatus() {
             Back to Dashboard
           </button>
         )}
-        {status === "processing" && (
+        {(status === "processing" || status === "tracking") && (
           <button
             className="rounded-lg bg-brand-600 px-6 py-2 text-white hover:bg-brand-700 disabled:opacity-50"
             onClick={handleStop}
@@ -213,7 +213,7 @@ export default function ProcessingStatus() {
             {stopping ? "Finishing analysis..." : "Stop & Analyze"}
           </button>
         )}
-        {(status === "queued" || status === "processing" || status === "detecting") && (
+        {(status === "queued" || status === "processing" || status === "tracking") && (
           <button
             className="rounded-lg bg-red-800 px-6 py-2 text-white hover:bg-red-700"
             onClick={handleCancel}

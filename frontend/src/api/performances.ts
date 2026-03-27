@@ -199,3 +199,26 @@ export async function selectDancers(
   const { data } = await api.post(`/performances/${id}/select-dancers`, { selections });
   return data;
 }
+
+export interface ClickPrompt {
+  x: number;
+  y: number;
+  label?: string;
+}
+
+export async function selectFrame(
+  id: number,
+  startTimestampMs: number,
+  prompts: ClickPrompt[],
+): Promise<{ status: string; dancers_selected: number }> {
+  const { data } = await api.post(`/performances/${id}/select-frame`, {
+    start_timestamp_ms: startTimestampMs,
+    prompts,
+  });
+  return data;
+}
+
+export async function resetTracking(id: number): Promise<{ status: string }> {
+  const { data } = await api.post(`/performances/${id}/reset-tracking`);
+  return data;
+}

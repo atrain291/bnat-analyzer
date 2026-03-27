@@ -79,7 +79,7 @@ export default function Dashboard() {
         setUploadPct,
         controller.signal
       );
-      navigate(`/processing/${result.performance_id}`);
+      navigate(`/select-frame/${result.performance_id}`);
     } catch (err: unknown) {
       if (err instanceof Error && err.name !== "CanceledError") {
         setError("Upload failed. Please try again.");
@@ -134,12 +134,15 @@ export default function Dashboard() {
               const statusIcon =
                 p.status === "complete" ? <CheckCircle2 size={16} className="text-green-400" /> :
                 p.status === "failed" ? <AlertCircle size={16} className="text-red-400" /> :
-                p.status === "processing" || p.status === "detecting" ? <Loader2 size={16} className="text-brand-400 animate-spin" /> :
+                p.status === "transcoding" || p.status === "tracking" || p.status === "processing" || p.status === "detecting" ? <Loader2 size={16} className="text-brand-400 animate-spin" /> :
+                p.status === "uploaded" ? <PlayCircle size={16} className="text-brand-400" /> :
                 <Clock size={16} className="text-gray-400" />;
 
               const href =
                 p.status === "complete" ? `/review/${p.id}` :
-                p.status === "awaiting_selection" ? `/select-dancers/${p.id}` :
+                p.status === "transcoding" || p.status === "uploaded" ? `/select-frame/${p.id}` :
+                p.status === "tracking" || p.status === "processing" || p.status === "detecting" ? `/processing/${p.id}` :
+                p.status === "awaiting_selection" ? `/select-frame/${p.id}` :
                 p.status === "failed" ? null :
                 `/processing/${p.id}`;
 
