@@ -6,9 +6,9 @@ from celery import current_task
 
 from app.celery_app import app
 from app.db import get_session
-from app.models.performance import Performance, PerformanceDancer, DetectedPerson, Frame, Analysis, JointAngleState, BalanceMetrics
+from app.models.performance import Performance, PerformanceDancer, Frame, Analysis, JointAngleState, BalanceMetrics
 from app.pipeline.ingest import extract_metadata
-from app.pipeline.pose import run_pose_estimation, run_pose_estimation_multi, run_pose_estimation_cropped
+from app.pipeline.pose import run_pose_estimation, run_pose_estimation_cropped
 from app.pipeline.pose_config import POSE_FRAME_SKIP
 from app.pipeline.angles import compute_frame_angles, OnlineAngleAccumulator
 from app.pipeline.llm import generate_coaching_feedback
