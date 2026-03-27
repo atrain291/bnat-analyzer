@@ -92,6 +92,7 @@ export interface Performance {
   analysis: AnalysisData[];
   detected_persons: DetectedPerson[];
   performance_dancers: PerformanceDancer[];
+  has_3d?: boolean;
 }
 
 export interface PerformanceListItem {
@@ -149,8 +150,10 @@ export async function getPerformance(id: number): Promise<Performance> {
   return data;
 }
 
-export async function getPerformanceFrames(id: number): Promise<FrameData[]> {
-  const { data } = await api.get(`/performances/${id}/frames`);
+export async function getPerformanceFrames(id: number, include3d: boolean = false): Promise<FrameData[]> {
+  const { data } = await api.get(`/performances/${id}/frames`, {
+    params: include3d ? { include_3d: true } : {},
+  });
   return data;
 }
 

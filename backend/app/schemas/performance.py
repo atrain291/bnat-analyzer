@@ -80,6 +80,7 @@ class PerformanceResponse(BaseModel):
     analysis: list[AnalysisResponse] = []
     detected_persons: list[DetectedPersonResponse] = []
     performance_dancers: list[PerformanceDancerResponse] = []
+    has_3d: bool = False
 
 
 class PerformanceListItem(BaseModel):

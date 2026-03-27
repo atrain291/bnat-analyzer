@@ -720,10 +720,19 @@ export default function VideoReview() {
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  const has3DData = useMemo(
-    () => frames.some((f) => f.joints_3d && f.joints_3d.length === 24),
-    [frames]
-  );
+  const has3DData = perf?.has_3d ?? false;
+
+  // Lazy-load 3D frame data when viewer is toggled on
+  const [frames3DLoaded, setFrames3DLoaded] = useState(false);
+  useEffect(() => {
+    if (!show3DViewer || frames3DLoaded || !performanceId || !has3DData) return;
+    getPerformanceFrames(Number(performanceId), true)
+      .then((data) => {
+        setFrames(data);
+        setFrames3DLoaded(true);
+      })
+      .catch(() => {});
+  }, [show3DViewer, frames3DLoaded, performanceId, has3DData]);
 
   if (loading) {
     return <div className="text-center text-gray-400 py-20">Loading...</div>;
@@ -896,9 +905,13 @@ export default function VideoReview() {
       {/* 3D Skeleton Viewer */}
       {show3DViewer && has3DData && (
         <div className="rounded-lg overflow-hidden bg-gray-900 border border-gray-700" style={{ height: 400 }}>
-          <Suspense fallback={<div className="flex items-center justify-center h-full text-gray-500">Loading 3D viewer...</div>}>
-            <Skeleton3DViewer dancers={current3DDancers} />
-          </Suspense>
+          {!frames3DLoaded ? (
+            <div className="flex items-center justify-center h-full text-gray-500">Loading 3D data...</div>
+          ) : (
+            <Suspense fallback={<div className="flex items-center justify-center h-full text-gray-500">Loading 3D viewer...</div>}>
+              <Skeleton3DViewer dancers={current3DDancers} />
+            </Suspense>
+          )}
         </div>
       )}
 

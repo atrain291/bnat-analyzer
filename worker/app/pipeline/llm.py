@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 
 import anthropic
 
@@ -115,13 +116,26 @@ Address the dancer respectfully as a guru would address a student.
 When referencing technique points, cite the specific adavu and movement (e.g., "In the 3rd Tattadavu,
 your aramandi depth on the Tam beats...")."""
 
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    return message.content[0].text
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            message = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return message.content[0].text
+        except (anthropic.RateLimitError, anthropic.APIStatusError) as e:
+            status = getattr(e, "status_code", 0)
+            if status == 529 or isinstance(e, anthropic.RateLimitError):
+                wait = min(2 ** attempt * 5, 60)
+                logger.warning(f"Claude API overloaded (attempt {attempt + 1}/{max_retries}), "
+                               f"retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
+    logger.error(f"Claude API failed after {max_retries} retries")
+    return "Coaching feedback temporarily unavailable due to high API demand. Please try again later."
 
 
 def _format_pose_summary(pose_summary: dict) -> str:

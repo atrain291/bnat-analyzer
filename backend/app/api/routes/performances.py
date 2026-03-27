@@ -65,24 +65,34 @@ def get_performance(performance_id: int, db: Session = Depends(get_db)):
     )
     if not performance:
         raise HTTPException(status_code=404, detail="Performance not found")
-    # Frames are loaded separately via /frames endpoint for performance
+    # Check if any frame has real 3D data (not JSON null)
+    from app.models.analysis import Frame
+    from sqlalchemy import func, cast, String
+    has_3d = db.query(Frame.id).filter(
+        Frame.performance_id == performance_id,
+        Frame.joints_3d.isnot(None),
+        cast(Frame.joints_3d, String) != "null",
+    ).limit(1).first() is not None
+    performance.has_3d = has_3d
     return performance
 
 
 @router.get("/{performance_id}/frames", response_model=list[FrameResponse])
-def get_performance_frames(performance_id: int, db: Session = Depends(get_db)):
-    """Return all frames for a performance. Only loads columns needed for display."""
+def get_performance_frames(performance_id: int, include_3d: bool = False, db: Session = Depends(get_db)):
+    """Return all frames for a performance. Only loads columns needed for display.
+
+    Pass include_3d=true to include joints_3d/world_position/foot_contact (large payload).
+    """
     from app.models.analysis import Frame
     performance = db.query(Performance).filter(Performance.id == performance_id).first()
     if not performance:
         raise HTTPException(status_code=404, detail="Performance not found")
     # Only select columns in FrameResponse — skip heavy left_hand, right_hand, face JSON
+    columns = [Frame.id, Frame.timestamp_ms, Frame.dancer_pose, Frame.performance_dancer_id]
+    if include_3d:
+        columns.extend([Frame.joints_3d, Frame.world_position, Frame.foot_contact])
     rows = (
-        db.query(
-            Frame.id, Frame.timestamp_ms, Frame.dancer_pose,
-            Frame.performance_dancer_id, Frame.joints_3d,
-            Frame.world_position, Frame.foot_contact,
-        )
+        db.query(*columns)
         .filter(Frame.performance_id == performance_id)
         .order_by(Frame.timestamp_ms)
         .all()
@@ -90,8 +100,10 @@ def get_performance_frames(performance_id: int, db: Session = Depends(get_db)):
     return [
         FrameResponse(
             id=r.id, timestamp_ms=r.timestamp_ms, dancer_pose=r.dancer_pose,
-            performance_dancer_id=r.performance_dancer_id, joints_3d=r.joints_3d,
-            world_position=r.world_position, foot_contact=r.foot_contact,
+            performance_dancer_id=r.performance_dancer_id,
+            joints_3d=r.joints_3d if include_3d else None,
+            world_position=r.world_position if include_3d else None,
+            foot_contact=r.foot_contact if include_3d else None,
         )
         for r in rows
     ]
