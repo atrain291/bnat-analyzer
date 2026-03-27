@@ -542,13 +542,20 @@ class SimpleTracker:
         if self._reseed_pending and bboxes:
             self._reseed_pending = False
             group_graves = [g_tid for g_tid in self.graveyard if g_tid in self._original_group_ids]
-            logger.info(f"Reseed executing: {len(group_graves)} group members in graveyard, "
-                        f"{len(self.graveyard)} total graveyard, {len(self.active_tracks)} active, "
-                        f"{len(bboxes)} detections")
+            active_group = [t for t in self.active_tracks if t in self._original_group_ids]
+            grave_group = [t for t in self.graveyard if t in self._original_group_ids]
+            logger.info(f"Reseed executing: {len(group_graves)} group in graveyard ({grave_group}), "
+                        f"{len(active_group)} group active ({active_group}), "
+                        f"original_group={sorted(self._original_group_ids)}, "
+                        f"group_ids={sorted(self.group_ids)}, "
+                        f"{len(self.graveyard)} total grave, {len(self.active_tracks)} total active, "
+                        f"{len(bboxes)} dets")
+            n_det = len(bboxes)
+            reseed_assignments = {}
+            assigned_dets = set()
+            assigned_graves = set()
+
             if group_graves:
-                # Build cost matrix: score each detection against each graveyarded group member
-                n_det = len(bboxes)
-                n_grave = len(group_graves)
                 score_matrix = np.zeros((n_det, n_grave), dtype=np.float32)
                 for di in range(n_det):
                     for gi, g_tid in enumerate(group_graves):
@@ -566,15 +573,12 @@ class SimpleTracker:
                         score_matrix[di, gi] = identity * size_ok
 
                 # Greedy assignment: best score first
-                assigned_dets = set()
-                assigned_graves = set()
                 flat_scores = []
                 for di in range(n_det):
                     for gi in range(n_grave):
                         flat_scores.append((score_matrix[di, gi], di, gi))
                 flat_scores.sort(reverse=True)
 
-                reseed_assignments = {}
                 for score, di, gi in flat_scores:
                     if di in assigned_dets or gi in assigned_graves:
                         continue
@@ -608,48 +612,64 @@ class SimpleTracker:
                     logger.info(f"Reseed identity-matched detection {di} -> track {g_tid} "
                                 f"(score={score_matrix[di, list(group_graves).index(g_tid)]:.3f})")
 
-                if not reseed_assignments:
-                    # Fallback: assign by proximity to original seed positions
-                    logger.warning("Identity-based reseed found no identity matches, "
-                                   "falling back to proximity-based assignment")
-                    for g_tid in group_graves:
-                        orig_bbox = self._original_bboxes.get(g_tid)
-                        if orig_bbox is None:
+            # If group members disappeared from everywhere, force them into graveyard
+            missing_group = [t for t in self._original_group_ids
+                             if t not in self.active_tracks and t not in self.graveyard]
+            if missing_group:
+                logger.warning(f"Group tracks {missing_group} vanished — restoring to graveyard from seed")
+                for tid in missing_group:
+                    orig = self._original_bboxes.get(tid)
+                    if orig:
+                        self.graveyard[tid] = orig
+                        self.graveyard_area[tid] = _bbox_area(orig)
+                        self.graveyard_age[tid] = self.relock_min_wait
+                        self.graveyard_velocity[tid] = (0.0, 0.0)
+                        if tid in self._original_histograms:
+                            self.graveyard_histogram[tid] = list(self._original_histograms[tid])
+                # Re-compute group_graves and run proximity fallback
+                group_graves = [g_tid for g_tid in self.graveyard if g_tid in self._original_group_ids]
+
+            if not reseed_assignments and group_graves:
+                # Fallback: assign by proximity to original seed positions
+                logger.warning("Identity-based reseed found no identity matches, "
+                               "falling back to proximity-based assignment")
+                for g_tid in group_graves:
+                    orig_bbox = self._original_bboxes.get(g_tid)
+                    if orig_bbox is None:
+                        continue
+                    best_di = -1
+                    best_dist = 999.0
+                    for di in range(n_det):
+                        if di in assigned_dets:
                             continue
-                        best_di = -1
-                        best_dist = 999.0
-                        for di in range(n_det):
-                            if di in assigned_dets:
-                                continue
-                            d = centroid_distance(bboxes[di], orig_bbox)
-                            if d < best_dist:
-                                best_dist = d
-                                best_di = di
-                        if best_di >= 0:
-                            reseed_assignments[best_di] = g_tid
-                            assigned_dets.add(best_di)
-                            assigned_graves.add(list(group_graves).index(g_tid))
-                            # Recover from graveyard
-                            self.active_tracks[g_tid] = bboxes[best_di]
-                            self.missing_count[g_tid] = 0
-                            self.last_seen_bbox[g_tid] = bboxes[best_di]
-                            self._update_avg_area(g_tid, bboxes[best_di])
-                            self.track_velocity[g_tid] = (0.0, 0.0)
-                            if g_tid in self.graveyard_histogram:
-                                self.track_histogram[g_tid] = self.graveyard_histogram.pop(g_tid)
-                            if g_tid in self.graveyard_biometric:
-                                self.track_biometric[g_tid] = self.graveyard_biometric.pop(g_tid)
-                            if g_tid in self.graveyard_embedding:
-                                self.track_embedding[g_tid] = self.graveyard_embedding.pop(g_tid)
-                            self.graveyard.pop(g_tid, None)
-                            self.graveyard_area.pop(g_tid, None)
-                            self.graveyard_age.pop(g_tid, None)
-                            self.graveyard_velocity.pop(g_tid, None)
-                            self._update_histogram(g_tid, hists[best_di])
-                            self._update_biometric(g_tid, bios[best_di])
-                            self._update_embedding(g_tid, embs[best_di])
-                            logger.info(f"Reseed proximity-matched detection {best_di} -> track {g_tid} "
-                                        f"(dist={best_dist:.3f})")
+                        d = centroid_distance(bboxes[di], orig_bbox)
+                        if d < best_dist:
+                            best_dist = d
+                            best_di = di
+                    if best_di >= 0:
+                        reseed_assignments[best_di] = g_tid
+                        assigned_dets.add(best_di)
+                        # Recover from graveyard
+                        self.active_tracks[g_tid] = bboxes[best_di]
+                        self.missing_count[g_tid] = 0
+                        self.last_seen_bbox[g_tid] = bboxes[best_di]
+                        self._update_avg_area(g_tid, bboxes[best_di])
+                        self.track_velocity[g_tid] = (0.0, 0.0)
+                        if g_tid in self.graveyard_histogram:
+                            self.track_histogram[g_tid] = self.graveyard_histogram.pop(g_tid)
+                        if g_tid in self.graveyard_biometric:
+                            self.track_biometric[g_tid] = self.graveyard_biometric.pop(g_tid)
+                        if g_tid in self.graveyard_embedding:
+                            self.track_embedding[g_tid] = self.graveyard_embedding.pop(g_tid)
+                        self.graveyard.pop(g_tid, None)
+                        self.graveyard_area.pop(g_tid, None)
+                        self.graveyard_age.pop(g_tid, None)
+                        self.graveyard_velocity.pop(g_tid, None)
+                        self._update_histogram(g_tid, hists[best_di])
+                        self._update_biometric(g_tid, bios[best_di])
+                        self._update_embedding(g_tid, embs[best_di])
+                        logger.info(f"Reseed proximity-matched detection {best_di} -> track {g_tid} "
+                                    f"(dist={best_dist:.3f})")
 
                 if reseed_assignments:
                     self.group_ids = set(self._original_group_ids)
@@ -745,6 +765,20 @@ class SimpleTracker:
                     used_tracks.add(tid)
                     logger.info(f"Seed-match: detection {best_det} -> track {tid} "
                                 f"(score={best_score:.3f})")
+
+        # Trace first 3 frames after seed for group track matching
+        if self._frame_counter <= 3:
+            for tid in self.group_ids:
+                if tid in self.active_tracks:
+                    t_bbox = self.active_tracks[tid]
+                    for di, d_bbox in enumerate(bboxes):
+                        if assignments[di] is not None:
+                            continue
+                        iou = compute_iou(d_bbox, t_bbox)
+                        dist = centroid_distance(d_bbox, t_bbox)
+                        size_ok = self._size_compatible(d_bbox, tid)
+                        logger.info(f"Frame {self._frame_counter} trace: det {di} vs group track {tid}: "
+                                    f"iou={iou:.3f}, dist={dist:.3f}, size_ok={size_ok}")
 
         # Match detections to tracks in two passes:
         # Pass 1: group tracks get priority (selected dancers should not lose to transients)
@@ -1022,15 +1056,25 @@ class SimpleTracker:
 
         still_unmatched = [i for i in still_unmatched if i not in relock_recovered]
 
-        # Assign new IDs to remaining unmatched detections
+        # Assign new IDs to remaining unmatched detections.
+        # When group tracking is active, cap non-group tracks to prevent explosion
+        # (800+ transient tracks from 5 detections overwhelms group matching).
+        max_non_group = max(10, len(self.group_ids) * 3) if self.group_ids else 999999
+        current_non_group = sum(1 for t in self.active_tracks if t not in self.group_ids)
         for det_idx in still_unmatched:
+            if self.group_ids and current_non_group >= max_non_group:
+                assignments[det_idx] = -1  # suppress — don't create transient track
+                continue
             assignments[det_idx] = self.next_id
             self.next_id += 1
+            current_non_group += 1
 
         # Update state
         new_tracks = {}
         new_missing = {}
         for det_idx, tid in enumerate(assignments):
+            if tid == -1:
+                continue  # Suppressed transient detection
             old_bbox = self.active_tracks.get(tid)
             new_tracks[tid] = bboxes[det_idx]
             new_missing[tid] = 0
