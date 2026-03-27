@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, UserPlus, Music, PlayCircle, Clock, CheckCircle2, Loader2, AlertCircle } from "lucide-react";
+import { Upload, UserPlus, Music, PlayCircle, Clock, CheckCircle2, Loader2, AlertCircle, Trash2 } from "lucide-react";
 import { listDancers, createDancer, Dancer } from "../api/dancers";
-import { uploadVideo, listPerformances, PerformanceListItem } from "../api/performances";
+import { uploadVideo, listPerformances, deletePerformance, PerformanceListItem } from "../api/performances";
 
 const ITEM_TYPES = [
   "Alarippu",
@@ -95,6 +95,18 @@ export default function Dashboard() {
     setUploading(false);
   };
 
+  const handleDelete = async (id: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm("Delete this performance? This cannot be undone.")) return;
+    try {
+      await deletePerformance(id);
+    } catch {
+      // May already be deleted — refresh list either way
+    }
+    setPerformances((prev) => prev.filter((p) => p.id !== id));
+    listPerformances().then(setPerformances).catch(() => {});
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const dropped = e.dataTransfer.files[0];
@@ -162,6 +174,13 @@ export default function Dashboard() {
                     {p.status !== "complete" && p.status !== "failed" && (
                       <span className="text-xs text-gray-400 capitalize">{p.status.replace("_", " ")}</span>
                     )}
+                    <button
+                      className="p-1.5 rounded text-gray-500 hover:text-red-400 hover:bg-gray-600/50 transition-colors"
+                      title="Delete performance"
+                      onClick={(e) => handleDelete(p.id, e)}
+                    >
+                      <Trash2 size={16} />
+                    </button>
                   </div>
                 </div>
               );
