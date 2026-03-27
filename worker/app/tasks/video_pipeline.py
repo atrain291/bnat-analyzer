@@ -338,7 +338,8 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                 per_dancer_frames[tid].append(fd)
 
             # Check per-dancer coverage — warn but proceed with partial results.
-            # Only fail if NO dancer has usable coverage.
+            # If the user explicitly stopped, skip coverage gate and analyze whatever we have.
+            was_cancelled = is_cancelled()
             total_captured = sum(len(f) for f in per_dancer_frames.values())
             video_duration_ms = metadata.get("duration_ms", 0)
             if video_duration_ms > 0 and total_captured > 0:
@@ -351,11 +352,11 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                             logger.warning(f"Performance {performance_id}: dancer {tid} only "
                                            f"tracked to {dancer_max_ms / 1000:.0f}s/{total_sec:.0f}s "
                                            f"({dancer_cov:.0%} coverage)")
-                # Only fail if the best-tracked dancer has <10% coverage
+                # Only fail if the best-tracked dancer has <10% coverage AND user didn't stop
                 max_dancer_ms = max((f[-1].get("timestamp_ms", 0) for f in per_dancer_frames.values() if f),
                                     default=0)
                 best_coverage = max_dancer_ms / video_duration_ms if video_duration_ms > 0 else 0
-                if best_coverage < 0.10:
+                if best_coverage < 0.10 and not was_cancelled:
                     last_sec = max_dancer_ms / 1000
                     error_msg = (f"Tracking lost all dancers after {last_sec:.0f}s of a {total_sec:.0f}s video. "
                                  f"Only {total_captured} frames captured ({best_coverage:.0%} coverage). "
@@ -368,6 +369,9 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                             perf.status = "failed"
                             perf.error = error_msg
                     return
+                elif best_coverage < 0.10 and was_cancelled:
+                    logger.warning(f"Performance {performance_id}: low coverage ({best_coverage:.0%}) but "
+                                   f"user requested stop — proceeding with {total_captured} frames")
             elif total_captured == 0:
                 error_msg = ("No frames captured for any selected dancer. "
                              "The tracker could not match any detections to the selected dancers. "
