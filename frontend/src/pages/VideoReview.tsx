@@ -1,7 +1,10 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { Play, Pause, SkipBack, Trash2, ArrowLeft } from "lucide-react";
+import { Play, Pause, SkipBack, Trash2, ArrowLeft, Box } from "lucide-react";
 import { getPerformance, getPerformanceFrames, getPerformanceTimeline, deletePerformance, Performance, FrameData, AnalysisData, TimelineFrame } from "../api/performances";
+import type { DancerSkeleton } from "../components/Skeleton3DViewer";
+
+const Skeleton3DViewer = lazy(() => import("../components/Skeleton3DViewer"));
 
 // COCO skeleton connections for Bharatanatyam visualization
 const SKELETON_CONNECTIONS: [string, string][] = [
@@ -493,6 +496,8 @@ export default function VideoReview() {
   const [timelineData, setTimelineData] = useState<TimelineFrame[]>([]);
   const [activeDancerTab, setActiveDancerTab] = useState<number | null>(null);
   const [visibleDancers, setVisibleDancers] = useState<Set<number>>(new Set());
+  const [show3DViewer, setShow3DViewer] = useState(false);
+  const [current3DDancers, setCurrent3DDancers] = useState<DancerSkeleton[]>([]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -625,17 +630,37 @@ export default function VideoReview() {
     const render = () => {
       const timeMs = video.currentTime * 1000;
       const matchedFrames: FrameData[] = [];
+      const MAX_STALE_MS = 200; // hide skeleton if nearest frame is >200ms away
       for (const [, dancerFrames] of framesByDancer) {
         const frame = findFrame(timeMs, dancerFrames);
-        if (frame) matchedFrames.push(frame);
+        if (frame && Math.abs(frame.timestamp_ms - timeMs) <= MAX_STALE_MS) {
+          matchedFrames.push(frame);
+        }
       }
       drawSkeletons(matchedFrames, canvas);
+
+      if (show3DViewer) {
+        const skeletons: DancerSkeleton[] = [];
+        for (const frame of matchedFrames) {
+          const pdId = frame.performance_dancer_id;
+          if (pdId && !visibleDancers.has(pdId)) continue;
+          if (frame.joints_3d && frame.joints_3d.length === 24) {
+            skeletons.push({
+              joints3d: frame.joints_3d,
+              footContact: frame.foot_contact,
+              color: getDancerColor(pdId),
+            });
+          }
+        }
+        setCurrent3DDancers(skeletons);
+      }
+
       animFrameRef.current = requestAnimationFrame(render);
     };
 
     animFrameRef.current = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animFrameRef.current);
-  }, [perf, frames, findFrame, drawSkeletons]);
+  }, [perf, frames, findFrame, drawSkeletons, show3DViewer, visibleDancers, getDancerColor]);
 
   // Resize canvas to match video
   useEffect(() => {
@@ -694,6 +719,11 @@ export default function VideoReview() {
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
+
+  const has3DData = useMemo(
+    () => frames.some((f) => f.joints_3d && f.joints_3d.length === 24),
+    [frames]
+  );
 
   if (loading) {
     return <div className="text-center text-gray-400 py-20">Loading...</div>;
@@ -834,6 +864,41 @@ export default function VideoReview() {
               </button>
             );
           })}
+          {has3DData && (
+            <button
+              className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm border transition-all ml-auto ${
+                show3DViewer ? "bg-brand-600/30 border-brand-500 text-brand-300" : "bg-gray-800/50 border-gray-700 text-gray-500"
+              }`}
+              onClick={() => setShow3DViewer((v) => !v)}
+            >
+              <Box size={14} />
+              3D View
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* 3D toggle for single-dancer (no performance_dancers) */}
+      {perf.performance_dancers.length === 0 && has3DData && (
+        <div className="flex gap-2 flex-wrap">
+          <button
+            className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm border transition-all ${
+              show3DViewer ? "bg-brand-600/30 border-brand-500 text-brand-300" : "bg-gray-800/50 border-gray-700 text-gray-500"
+            }`}
+            onClick={() => setShow3DViewer((v) => !v)}
+          >
+            <Box size={14} />
+            3D View
+          </button>
+        </div>
+      )}
+
+      {/* 3D Skeleton Viewer */}
+      {show3DViewer && has3DData && (
+        <div className="rounded-lg overflow-hidden bg-gray-900 border border-gray-700" style={{ height: 400 }}>
+          <Suspense fallback={<div className="flex items-center justify-center h-full text-gray-500">Loading 3D viewer...</div>}>
+            <Skeleton3DViewer dancers={current3DDancers} />
+          </Suspense>
         </div>
       )}
 
