@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Loader2, CheckCircle2, XCircle } from "lucide-react";
-import { getPerformanceStatus, deletePerformance, stopPerformance, PipelineProgress } from "../api/performances";
+import { getPerformanceStatus, deletePerformance, stopPerformance, retryPerformance, PipelineProgress } from "../api/performances";
 
 const STAGES = [
   { key: "tracking", label: "Tracking Dancers", weight: 30 },
@@ -197,12 +197,39 @@ export default function ProcessingStatus() {
       {/* Actions */}
       <div className="flex justify-center gap-4">
         {status === "failed" && (
-          <button
-            className="rounded-lg bg-gray-700 px-6 py-2 text-white hover:bg-gray-600"
-            onClick={() => navigate("/")}
-          >
-            Back to Dashboard
-          </button>
+          <>
+            <button
+              className="rounded-lg bg-brand-600 px-6 py-2 text-white hover:bg-brand-700"
+              onClick={async () => {
+                if (!performanceId) return;
+                await retryPerformance(Number(performanceId));
+                setStatus("processing");
+                setError(null);
+                stageStartTimes.current = {};
+                intervalRef.current = setInterval(async () => {
+                  const data = await getPerformanceStatus(Number(performanceId));
+                  setStatus(data.status);
+                  setProgress(data.pipeline_progress);
+                  setError(data.error);
+                  if (data.status === "complete") {
+                    if (intervalRef.current) clearInterval(intervalRef.current);
+                    setTimeout(() => navigate(`/review/${performanceId}`), 1500);
+                  }
+                  if (data.status === "failed") {
+                    if (intervalRef.current) clearInterval(intervalRef.current);
+                  }
+                }, 2000);
+              }}
+            >
+              Retry
+            </button>
+            <button
+              className="rounded-lg bg-gray-700 px-6 py-2 text-white hover:bg-gray-600"
+              onClick={() => navigate("/")}
+            >
+              Back to Dashboard
+            </button>
+          </>
         )}
         {(status === "processing" || status === "tracking") && (
           <button

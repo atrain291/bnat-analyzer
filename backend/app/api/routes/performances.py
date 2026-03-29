@@ -271,6 +271,35 @@ def select_frame(performance_id: int, body: SelectFrameRequest, db: Session = De
     return {"status": "tracking", "dancers_selected": len(body.prompts)}
 
 
+@router.post("/{performance_id}/retry")
+def retry_performance(performance_id: int, db: Session = Depends(get_db)):
+    """Retry a failed performance, resuming from the last completed stage."""
+    performance = db.query(Performance).filter(Performance.id == performance_id).first()
+    if not performance:
+        raise HTTPException(status_code=404, detail="Performance not found")
+    if performance.status != "failed":
+        raise HTTPException(status_code=400, detail=f"Can only retry failed performances (status: {performance.status})")
+
+    # Build selected_tracks from existing PerformanceDancer rows
+    dancers = db.query(PerformanceDancer).filter(
+        PerformanceDancer.performance_id == performance_id,
+    ).all()
+    selected_tracks = [
+        {"track_id": d.track_id, "performance_dancer_id": d.id, "label": d.label}
+        for d in dancers
+    ] if dancers else None
+
+    performance.status = "processing"
+    performance.error = None
+    db.commit()
+
+    video_path = f"/app/uploads/{performance.video_key}"
+    from app.tasks import dispatch_pipeline
+    dispatch_pipeline(performance_id, video_path, selected_tracks, resume=True)
+
+    return {"status": "processing", "message": "Retrying from last completed stage"}
+
+
 @router.post("/{performance_id}/reset-tracking")
 def reset_tracking(performance_id: int, db: Session = Depends(get_db)):
     performance = db.query(Performance).filter(Performance.id == performance_id).first()

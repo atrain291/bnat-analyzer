@@ -65,4 +65,4 @@ ENV PYTHONPATH="/opt/wham:${PYTHONPATH}"
 
 COPY . .
 
-CMD ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "-Q", "wham_3d", "-c", "1", "--prefetch-multiplier=1"]
+CMD ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "-Q", "wham_3d", "-c", "1", "--prefetch-multiplier=1", "--max-memory-per-child=8000000"]

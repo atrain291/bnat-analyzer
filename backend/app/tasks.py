@@ -31,11 +31,12 @@ def dispatch_detection(performance_id: int, video_path: str) -> str:
     return result.id
 
 
-def dispatch_pipeline(performance_id: int, video_path: str, selected_tracks: list[dict] | None = None) -> str:
+def dispatch_pipeline(performance_id: int, video_path: str, selected_tracks: list[dict] | None = None,
+                      resume: bool = False) -> str:
     result = celery_app.send_task(
         "worker.app.tasks.video_pipeline.run_pipeline",
         args=[performance_id, video_path],
-        kwargs={"selected_tracks": selected_tracks},
+        kwargs={"selected_tracks": selected_tracks, "resume": resume},
         queue="video_pipeline",
     )
     return result.id

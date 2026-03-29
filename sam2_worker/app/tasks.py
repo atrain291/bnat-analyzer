@@ -1,5 +1,6 @@
 """SAM 2 tracking Celery task."""
 
+import gc
 import logging
 import os
 import traceback
@@ -117,10 +118,12 @@ def run_sam2_tracking(
         )
         logger.info("Dispatched pose pipeline for performance %d", performance_id)
 
+        del results
+        gc.collect()
+
         return {
             "performance_id": performance_id,
             "status": "tracked",
-            "tracking_frames": len(results),
         }
 
     except Exception as e:

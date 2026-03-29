@@ -3,6 +3,7 @@
 Reads 2D pose data from Postgres, runs WHAM 3D reconstruction,
 writes joints_3d/foot_contact/world_position back to frames table.
 """
+import gc
 import logging
 import time
 
@@ -220,8 +221,10 @@ def run_wham_3d(self, performance_id: int, video_path: str, video_info: dict) ->
             total_updated += updated
             logger.info("Updated %d frames with 3D data for %s", updated, label)
 
-        # Release GPU
+        # Release GPU and free large data structures
+        del dancer_results, dancers, rows
         release_model()
+        gc.collect()
 
         logger.info("WHAM 3D complete for performance %d: %d frames updated", performance_id, total_updated)
         return {"performance_id": performance_id, "status": "complete", "frames_updated": total_updated}
@@ -229,5 +232,6 @@ def run_wham_3d(self, performance_id: int, video_path: str, video_info: dict) ->
     except Exception as e:
         logger.exception("WHAM 3D failed for performance %d", performance_id)
         release_model()
+        gc.collect()
         return {"performance_id": performance_id, "status": "failed", "error": str(e)[:500],
                 "frames_updated": total_updated}

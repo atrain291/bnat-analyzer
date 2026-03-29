@@ -103,6 +103,7 @@ class PerformanceDancer(Base):
     performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id", ondelete="CASCADE"), index=True)
     track_id: Mapped[int] = mapped_column(Integer)
     label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    pose_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     performance: Mapped["Performance"] = relationship(back_populates="performance_dancers")
     frames: Mapped[list["Frame"]] = relationship(back_populates="performance_dancer", cascade="all, delete-orphan")  # noqa: F821

@@ -218,6 +218,11 @@ export async function selectFrame(
   return data;
 }
 
+export async function retryPerformance(id: number): Promise<{ status: string }> {
+  const { data } = await api.post(`/performances/${id}/retry`);
+  return data;
+}
+
 export async function resetTracking(id: number): Promise<{ status: string }> {
   const { data } = await api.post(`/performances/${id}/reset-tracking`);
   return data;

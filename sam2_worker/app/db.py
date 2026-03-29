@@ -9,7 +9,7 @@ DATABASE_URL = os.environ.get(
     "postgresql://bharatanatyam:bharatanatyam@postgres:5432/bharatanatyam_analyzer",
 )
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=2)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=2, max_overflow=0, pool_recycle=1800)
 SessionLocal = sessionmaker(bind=engine)
 
 

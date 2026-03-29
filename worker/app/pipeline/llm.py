@@ -29,15 +29,23 @@ def generate_coaching_feedback(
         pose_summary: Aggregated pose statistics from frame analysis.
     """
 
+    if os.environ.get("SKIP_LLM_COACHING", "").lower() in ("true", "1", "yes"):
+        logger.info("LLM coaching skipped (SKIP_LLM_COACHING=true)")
+        return "Coaching feedback skipped. Scores and pose analysis are still available."
+
+    llm_provider = os.environ.get("LLM_PROVIDER", "anthropic")
+
+    if llm_provider not in ("anthropic", "openai_compat"):
+        logger.warning(f"Unknown LLM_PROVIDER '{llm_provider}', falling back to anthropic")
+        llm_provider = "anthropic"
+
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
+    if llm_provider == "anthropic" and not api_key:
         logger.warning("ANTHROPIC_API_KEY not set, returning placeholder feedback")
         return (
             "Coaching feedback unavailable (API key not configured). "
             "The pose skeleton overlay is available for visual review."
         )
-
-    client = anthropic.Anthropic(api_key=api_key)
 
     duration_sec = duration_ms / 1000
     context_parts = [f"Duration: {duration_sec:.1f} seconds", f"Frames analyzed: {frame_count}"]
@@ -116,11 +124,22 @@ Address the dancer respectfully as a guru would address a student.
 When referencing technique points, cite the specific adavu and movement (e.g., "In the 3rd Tattadavu,
 your aramandi depth on the Tam beats...")."""
 
+    if llm_provider == "openai_compat":
+        return _call_openai_compat(prompt)
+    else:
+        return _call_anthropic(prompt, api_key)
+
+
+def _call_anthropic(prompt: str, api_key: str) -> str:
+    """Call Claude API with retry logic."""
+    client = anthropic.Anthropic(api_key=api_key)
+    model = os.environ.get("LLM_MODEL", "claude-sonnet-4-20250514")
+
     max_retries = 5
     for attempt in range(max_retries):
         try:
             message = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=model,
                 max_tokens=1024,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -136,6 +155,25 @@ your aramandi depth on the Tam beats...")."""
                 raise
     logger.error(f"Claude API failed after {max_retries} retries")
     return "Coaching feedback temporarily unavailable due to high API demand. Please try again later."
+
+
+def _call_openai_compat(prompt: str) -> str:
+    """Call any OpenAI-compatible API (LM Studio, Ollama, vLLM, etc.)."""
+    from openai import OpenAI
+
+    base_url = os.environ.get("LLM_BASE_URL", "http://localhost:1234/v1")
+    model = os.environ.get("LLM_MODEL", "default")
+    api_key = os.environ.get("LLM_API_KEY", "not-needed")
+
+    logger.info(f"Using OpenAI-compatible LLM: {base_url} model={model}")
+
+    client = OpenAI(base_url=base_url, api_key=api_key)
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.choices[0].message.content
 
 
 def _format_pose_summary(pose_summary: dict) -> str:

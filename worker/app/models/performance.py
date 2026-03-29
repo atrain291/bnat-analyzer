@@ -136,6 +136,7 @@ class PerformanceDancer(Base):
     performance_id: Mapped[int] = mapped_column(ForeignKey("performances.id"), index=True)
     track_id: Mapped[int] = mapped_column(Integer)
     label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    pose_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class Analysis(Base):

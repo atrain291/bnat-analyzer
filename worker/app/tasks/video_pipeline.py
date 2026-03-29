@@ -1,3 +1,4 @@
+import gc
 import logging
 import time
 import traceback
@@ -266,9 +267,72 @@ def _analyze_dancer(performance_id, performance_dancer_id, label, frame_count,
         session.add(analysis)
 
 
+def _try_resume_to_analysis(performance_id, selected_tracks, metadata, beat_data, update_progress):
+    """Check if frames+pose_summary already exist and only analysis is missing.
+
+    Returns True if analysis was completed for all dancers that needed it.
+    Returns False if a full re-run from pose estimation is needed.
+    """
+    from app.models.performance import Frame, Analysis
+
+    track_id_to_info = {t["track_id"]: t for t in selected_tracks}
+
+    with get_session() as session:
+        # Check which dancers already have frames and which need analysis
+        dancers_needing_analysis = []
+        for track_id, info in track_id_to_info.items():
+            pd_id = info["performance_dancer_id"]
+            frame_count = session.query(Frame).filter(
+                Frame.performance_dancer_id == pd_id,
+            ).count()
+            has_analysis = session.query(Analysis).filter(
+                Analysis.performance_dancer_id == pd_id,
+            ).count() > 0
+
+            if frame_count == 0:
+                logger.info(f"Resume: dancer {track_id} has no frames, need full re-run")
+                return False
+
+            if has_analysis:
+                logger.info(f"Resume: dancer {track_id} already has analysis, skipping")
+                continue
+
+            # Need analysis — check for stored pose_summary
+            pd = session.query(PerformanceDancer).filter(
+                PerformanceDancer.id == pd_id,
+            ).first()
+            if not pd or not pd.pose_summary:
+                logger.info(f"Resume: dancer {track_id} has frames but no pose_summary, need full re-run")
+                return False
+
+            dancers_needing_analysis.append((track_id, info, frame_count, pd.pose_summary))
+
+    if not dancers_needing_analysis:
+        logger.info(f"Resume: all dancers already have analysis for performance {performance_id}")
+        return True
+
+    logger.info(f"Resume: re-running analysis for {len(dancers_needing_analysis)} dancer(s)")
+
+    num_dancers = len(dancers_needing_analysis)
+    for i, (track_id, info, frame_count, pose_summary) in enumerate(dancers_needing_analysis):
+        dancer_label = info.get("label") or f"Dancer {i + 1}"
+        pct = 83.0 + (i / max(num_dancers, 1)) * 12.0
+        update_progress("llm_synthesis", pct,
+                        message=f"Generating coaching for {dancer_label}... ({i + 1}/{num_dancers})")
+        _analyze_dancer(
+            performance_id, info["performance_dancer_id"],
+            info.get("label"), frame_count, pose_summary, metadata,
+            beat_data=beat_data,
+        )
+
+    return True
+
+
 @app.task(bind=True, name="worker.app.tasks.video_pipeline.run_pipeline")
-def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: list[dict] | None = None):
-    logger.info(f"Starting pipeline for performance {performance_id}: {video_path}")
+def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: list[dict] | None = None,
+                 resume: bool = False):
+    logger.info(f"Starting pipeline for performance {performance_id}: {video_path}"
+                f"{' (RESUME)' if resume else ''}")
     update_progress = _make_progress_updater(performance_id, status="processing")
 
     try:
@@ -289,19 +353,47 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
         is_cancelled = _make_cancel_checker(performance_id)
 
         # Stage 1b: Audio beat detection (fast, CPU-only, runs before pose estimation)
-        update_progress("beat_detection", 10.0, message="Analyzing audio for beat onsets...")
+        # On resume, read stored beat data instead of re-analyzing
         beat_data = None
-        try:
-            beat_data = run_beat_analysis(video_path, metadata, start_ms=start_ms)
-            if beat_data:
-                with get_session() as session:
-                    perf = session.query(Performance).filter(Performance.id == performance_id).first()
-                    if perf:
-                        perf.beat_timestamps = beat_data["onset_timestamps_ms"]
-                        perf.tempo_bpm = beat_data["tempo_bpm"]
-                logger.info(f"Beat detection: {beat_data['onset_count']} onsets at {beat_data['tempo_bpm']} BPM")
-        except Exception as e:
-            logger.warning(f"Beat detection failed (non-fatal): {e}")
+        if resume:
+            with get_session() as session:
+                perf = session.query(Performance).filter(Performance.id == performance_id).first()
+                if perf and perf.beat_timestamps:
+                    beat_data = {
+                        "onset_timestamps_ms": perf.beat_timestamps,
+                        "tempo_bpm": perf.tempo_bpm,
+                        "onset_count": len(perf.beat_timestamps),
+                    }
+                    logger.info(f"Resume: loaded stored beat data ({beat_data['onset_count']} onsets)")
+        if not beat_data:
+            update_progress("beat_detection", 10.0, message="Analyzing audio for beat onsets...")
+            try:
+                beat_data = run_beat_analysis(video_path, metadata, start_ms=start_ms)
+                if beat_data:
+                    with get_session() as session:
+                        perf = session.query(Performance).filter(Performance.id == performance_id).first()
+                        if perf:
+                            perf.beat_timestamps = beat_data["onset_timestamps_ms"]
+                            perf.tempo_bpm = beat_data["tempo_bpm"]
+                    logger.info(f"Beat detection: {beat_data['onset_count']} onsets at {beat_data['tempo_bpm']} BPM")
+            except Exception as e:
+                logger.warning(f"Beat detection failed (non-fatal): {e}")
+
+        # On resume, check what work is already done and skip to analysis if possible
+        if resume and selected_tracks:
+            skip_to_analysis = _try_resume_to_analysis(
+                performance_id, selected_tracks, metadata, beat_data, update_progress,
+            )
+            if skip_to_analysis:
+                # Dispatch WHAM and complete
+                video_info = {"width": metadata.get("width", 1920), "height": metadata.get("height", 1080),
+                              "fps": metadata.get("fps", 30)}
+                dispatch_wham_3d(performance_id, video_path, video_info)
+                update_progress("scoring", 95.0, message="Computing final scores...")
+                update_progress("complete", 100.0, final_status="complete", message="Analysis complete!")
+                logger.info(f"Pipeline resume complete for performance {performance_id}")
+                gc.collect()
+                return {"status": "complete"}
 
         if selected_tracks:
             # Multi-dancer mode — use SAM 2 tracking bboxes for cropped pose estimation
@@ -407,8 +499,18 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                         session, performance_id, pd_id, frames_data,
                     )
                 pose_summary = accumulator.summarize()
+                # Persist pose_summary for pipeline retry
+                with get_session() as session:
+                    pd = session.query(PerformanceDancer).filter(
+                        PerformanceDancer.id == pd_id,
+                    ).first()
+                    if pd:
+                        pd.pose_summary = pose_summary
                 dancer_results[track_id] = (frame_count, pose_summary, accumulator)
                 del frames_data  # allow GC before next dancer
+
+            del per_dancer_frames
+            gc.collect()
 
             # Analyze each dancer with pre-computed stats (no second pass)
             num_dancers = len(selected_tracks)
@@ -458,6 +560,7 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
         update_progress("complete", 100.0, final_status="complete", message="Analysis complete!")
 
         logger.info(f"Pipeline complete for performance {performance_id}")
+        gc.collect()
         return {"status": "complete"}
 
     except Exception as e:

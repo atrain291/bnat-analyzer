@@ -19,4 +19,4 @@ COPY . .
 
 RUN mkdir -p /app/uploads /app/trt_cache
 
-CMD ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "-Q", "video_pipeline", "-c", "1", "--prefetch-multiplier=1"]
+CMD ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "-Q", "video_pipeline", "-c", "1", "--prefetch-multiplier=1", "--max-memory-per-child=8000000"]
