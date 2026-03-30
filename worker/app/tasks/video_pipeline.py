@@ -9,7 +9,7 @@ from app.celery_app import app
 from app.db import get_session
 from app.models.performance import Performance, PerformanceDancer, Frame, Analysis, JointAngleState, BalanceMetrics
 from app.pipeline.ingest import extract_metadata
-from app.pipeline.pose import run_pose_estimation, run_pose_estimation_cropped
+from app.pipeline.pose import run_pose_estimation, run_pose_estimation_multi
 from app.pipeline.pose_config import POSE_FRAME_SKIP
 from app.pipeline.angles import compute_frame_angles, OnlineAngleAccumulator
 from app.pipeline.llm import generate_coaching_feedback
@@ -408,15 +408,12 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                 update_progress("pose_estimation", pct, frame=current_frame, total_frames=total,
                                 message=f"Estimating poses... frame {current_frame}/{total}")
 
-            # Process each dancer independently using SAM 2 tracking bboxes
-            per_dancer_frames: dict[int, list[dict]] = {tid: [] for tid in selected_ids}
-
+            # Fetch tracking bboxes for ALL dancers at once
             from app.models.performance import TrackingFrame
 
+            all_dancer_bboxes: dict[int, list[dict]] = {}
             for track_id in selected_ids:
                 dancer_index = track_id  # track_id == dancer_index in SAM 2 flow
-
-                # Fetch tracking bboxes for this dancer
                 with get_session() as session:
                     rows = session.query(TrackingFrame).filter(
                         TrackingFrame.performance_id == performance_id,
@@ -426,20 +423,19 @@ def run_pipeline(self, performance_id: int, video_path: str, selected_tracks: li
                         {"timestamp_ms": r.timestamp_ms, "bbox": r.bbox, "mask_iou": r.mask_iou}
                         for r in rows
                     ]
-
-                if not dancer_bboxes:
+                if dancer_bboxes:
+                    all_dancer_bboxes[track_id] = dancer_bboxes
+                else:
                     logger.warning(f"No tracking data for dancer {dancer_index}")
-                    continue
 
-                update_progress("pose_estimation", 20.0,
-                                message=f"Loading pose model for dancer {track_id}...")
+            update_progress("pose_estimation", 20.0,
+                            message=f"Loading pose model for {len(all_dancer_bboxes)} dancers...")
 
-                frame_gen = run_pose_estimation_cropped(
-                    video_path, metadata, dancer_bboxes, start_ms=start_ms,
-                    progress_callback=pose_progress, is_cancelled=is_cancelled,
-                )
-                for fd in frame_gen:
-                    per_dancer_frames[track_id].append(fd)
+            # Process all dancers together — one pass through the video
+            per_dancer_frames = run_pose_estimation_multi(
+                video_path, metadata, all_dancer_bboxes, start_ms=start_ms,
+                progress_callback=pose_progress, is_cancelled=is_cancelled,
+            )
 
             # Check per-dancer coverage — warn but proceed with partial results.
             # If the user explicitly stopped, skip coverage gate and analyze whatever we have.

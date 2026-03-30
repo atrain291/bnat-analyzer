@@ -27,7 +27,28 @@ export default function SelectFrame() {
 
   useEffect(() => {
     if (!performanceId) return;
-    getPerformance(Number(performanceId)).then(setPerf).catch(() => navigate("/"));
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const load = async () => {
+      try {
+        const data = await getPerformance(Number(performanceId));
+        if (cancelled) return;
+        setPerf(data);
+        // Keep polling until transcode finishes
+        if (data.status !== "uploaded") {
+          timer = setTimeout(load, 1500);
+        }
+      } catch {
+        if (!cancelled) navigate("/");
+      }
+    };
+    load();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [performanceId, navigate]);
 
   // Sync canvas size to video display size
